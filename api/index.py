@@ -1868,6 +1868,43 @@ Respond with ONLY valid JSON, no other text."""
 
         supabase = get_supabase_client()
 
+        # Delete a single file from a contract
+        file_delete_match = re.match(r"/api/contracts/([^/]+)/files/([^/]+)", path)
+        if file_delete_match:
+            contract_id = file_delete_match.group(1)
+            file_id = file_delete_match.group(2)
+
+            # Verify contract ownership
+            contract = supabase.table("contracts").select("id, user_id").eq("id", contract_id).single().execute()
+            if not contract.data:
+                return self.send_error_json("Contract not found", 404)
+            if contract.data.get("user_id") != user_id:
+                return self.send_error_json("Forbidden", 403)
+
+            # Get the file record
+            file_record = supabase.table("contract_files").select("*").eq("id", file_id).eq("contract_id", contract_id).single().execute()
+            if not file_record.data:
+                return self.send_error_json("File not found", 404)
+
+            # Delete from storage
+            if file_record.data.get("file_path"):
+                try:
+                    supabase.storage.from_("contracts").remove([file_record.data["file_path"]])
+                except Exception:
+                    pass
+
+            # Delete the contract_files record
+            supabase.table("contract_files").delete().eq("id", file_id).execute()
+
+            # Delete associated chunks by source_file
+            try:
+                supabase.table("contract_chunks").delete().eq("contract_id", contract_id).eq("source_file", file_record.data.get("file_name", "")).execute()
+            except Exception:
+                pass
+
+            return self.send_json({"status": "deleted", "file_id": file_id})
+
+        # Delete entire contract
         if path.startswith("/api/contracts/"):
             contract_id = path.split("/")[-1]
 

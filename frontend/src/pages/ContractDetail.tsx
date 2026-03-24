@@ -13,9 +13,10 @@ import {
   Upload,
   X,
   Plus,
-  CheckCircle
+  CheckCircle,
+  Trash2
 } from 'lucide-react'
-import { getContract, getContracts, addContractFiles } from '../lib/api'
+import { getContract, getContracts, addContractFiles, deleteContractFile } from '../lib/api'
 import ContractQA from '../components/ContractQA'
 import type { Contract, ContractParty, ContractRisk, UploadFile, DocumentType, MergeSummary, AddFilesResponse } from '../types'
 import { DOCUMENT_TYPE_OPTIONS } from '../types'
@@ -110,6 +111,25 @@ export default function ContractDetail() {
 
   const updateFileType = (index: number, docType: DocumentType) => {
     setNewFiles(prev => prev.map((f, i) => i === index ? { ...f, document_type: docType } : f))
+  }
+
+  const [deletingFileId, setDeletingFileId] = useState<string | null>(null)
+
+  const handleDeleteFile = async (fileId: string) => {
+    if (!contract) return
+    if (!window.confirm('Remove this document from the contract?')) return
+    setDeletingFileId(fileId)
+    try {
+      await deleteContractFile(contract.id, fileId)
+      setContract({
+        ...contract,
+        files: contract.files?.filter(f => f.id !== fileId)
+      })
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Failed to delete file')
+    } finally {
+      setDeletingFileId(null)
+    }
   }
 
   const handleAddFiles = async () => {
@@ -367,7 +387,7 @@ export default function ContractDetail() {
             {contract.files && contract.files.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {contract.files.map((file) => (
-                  <div key={file.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-md">
+                  <div key={file.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-md group">
                     <FileText className="w-5 h-5 text-gray-400" />
                     <div className="flex-1 min-w-0">
                       <p className="font-medium text-gray-900 truncate">{file.file_name}</p>
@@ -376,6 +396,18 @@ export default function ContractDetail() {
                         {file.label && file.label !== file.file_name && ` - ${file.label}`}
                       </p>
                     </div>
+                    <button
+                      onClick={() => handleDeleteFile(file.id)}
+                      disabled={deletingFileId === file.id}
+                      className="opacity-0 group-hover:opacity-100 p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded transition-all"
+                      title="Remove document"
+                    >
+                      {deletingFileId === file.id ? (
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-red-500" />
+                      ) : (
+                        <Trash2 className="w-4 h-4" />
+                      )}
+                    </button>
                   </div>
                 ))}
               </div>

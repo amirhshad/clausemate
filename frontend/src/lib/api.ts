@@ -62,6 +62,15 @@ export async function deleteContract(id: string): Promise<void> {
   if (!res.ok) throw new Error('Failed to delete contract')
 }
 
+export async function deleteContractFile(contractId: string, fileId: string): Promise<void> {
+  const headers = await getAuthHeader()
+  const res = await fetch(`${API_URL}/api/contracts/${contractId}/files/${fileId}`, {
+    method: 'DELETE',
+    headers,
+  })
+  if (!res.ok) throw new Error('Failed to delete file')
+}
+
 // Upload API - Multi-file support
 export async function extractContracts(files: UploadFile[]): Promise<ExtractionResult> {
   const headers = await getAuthHeader()
