@@ -14,7 +14,9 @@ import {
   X,
   Plus,
   CheckCircle,
-  Trash2
+  Trash2,
+  ChevronDown,
+  ChevronUp
 } from 'lucide-react'
 import { getContract, getContracts, addContractFiles, deleteContractFile } from '../lib/api'
 import ContractQA from '../components/ContractQA'
@@ -113,6 +115,8 @@ export default function ContractDetail() {
     setNewFiles(prev => prev.map((f, i) => i === index ? { ...f, document_type: docType } : f))
   }
 
+  const [expandedTerms, setExpandedTerms] = useState(false)
+  const [expandedRisks, setExpandedRisks] = useState(false)
   const [deletingFileId, setDeletingFileId] = useState<string | null>(null)
 
   const handleDeleteFile = async (fileId: string) => {
@@ -303,7 +307,7 @@ export default function ContractDetail() {
               {parties.length === 0 ? (
                 <p className="text-gray-500 text-sm">No parties extracted. Re-upload the contract to extract party information.</p>
               ) : (
-                <div className="space-y-3">
+                <div className="space-y-3 max-h-64 overflow-y-auto">
                   {parties.map((party, index) => (
                     <div key={index} className="border-l-2 border-primary-200 pl-3 py-1">
                       <p className="font-medium text-gray-900">{party.name}</p>
@@ -325,14 +329,28 @@ export default function ContractDetail() {
               {keyTerms.length === 0 ? (
                 <p className="text-gray-500 text-sm">No key terms extracted.</p>
               ) : (
-                <ul className="space-y-2">
-                  {keyTerms.map((term, index) => (
-                    <li key={index} className="flex items-start gap-2">
-                      <span className="w-1.5 h-1.5 rounded-full bg-primary-500 mt-2 flex-shrink-0"></span>
-                      <span className="text-sm text-gray-700">{term}</span>
-                    </li>
-                  ))}
-                </ul>
+                <>
+                  <ul className={`space-y-2 overflow-hidden ${expandedTerms ? '' : 'max-h-64'}`}>
+                    {keyTerms.map((term, index) => (
+                      <li key={index} className="flex items-start gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full bg-primary-500 mt-2 flex-shrink-0"></span>
+                        <span className="text-sm text-gray-700">{term}</span>
+                      </li>
+                    ))}
+                  </ul>
+                  {keyTerms.length > 8 && (
+                    <button
+                      onClick={() => setExpandedTerms(!expandedTerms)}
+                      className="mt-3 flex items-center gap-1 text-sm text-primary-600 hover:text-primary-700 font-medium"
+                    >
+                      {expandedTerms ? (
+                        <><ChevronUp className="w-4 h-4" /> Show less</>
+                      ) : (
+                        <><ChevronDown className="w-4 h-4" /> Show all {keyTerms.length} terms</>
+                      )}
+                    </button>
+                  )}
+                </>
               )}
             </div>
 
@@ -347,20 +365,34 @@ export default function ContractDetail() {
               {risks.length === 0 ? (
                 <p className="text-gray-500 text-sm">No risks identified. Re-upload the contract to analyze risks.</p>
               ) : (
-                <div className="space-y-3">
-                  {risks.map((risk, index) => (
-                    <div
-                      key={index}
-                      className={`p-3 rounded-md border ${getSeverityColor(risk.severity)}`}
-                    >
-                      <div className="flex items-center justify-between mb-1">
-                        <p className="font-medium text-sm">{risk.title}</p>
-                        <span className="text-xs uppercase font-semibold">{risk.severity}</span>
+                <>
+                  <div className={`space-y-3 overflow-hidden ${expandedRisks ? '' : 'max-h-64'}`}>
+                    {risks.map((risk, index) => (
+                      <div
+                        key={index}
+                        className={`p-3 rounded-md border ${getSeverityColor(risk.severity)}`}
+                      >
+                        <div className="flex items-center justify-between mb-1">
+                          <p className="font-medium text-sm">{risk.title}</p>
+                          <span className="text-xs uppercase font-semibold">{risk.severity}</span>
+                        </div>
+                        <p className="text-xs">{risk.description}</p>
                       </div>
-                      <p className="text-xs">{risk.description}</p>
-                    </div>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                  {risks.length > 3 && (
+                    <button
+                      onClick={() => setExpandedRisks(!expandedRisks)}
+                      className="mt-3 flex items-center gap-1 text-sm text-primary-600 hover:text-primary-700 font-medium"
+                    >
+                      {expandedRisks ? (
+                        <><ChevronUp className="w-4 h-4" /> Show less</>
+                      ) : (
+                        <><ChevronDown className="w-4 h-4" /> Show all {risks.length} risks</>
+                      )}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           </div>
