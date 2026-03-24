@@ -1665,12 +1665,23 @@ Respond with ONLY valid JSON, no other text."""
 
                 supabase.table("contracts").update(update_payload).eq("id", contract_id).execute()
 
-                # --- RAG: extract full text from new files, append chunks ---
+                # --- RAG: build text from extraction data (no extra AI call) ---
                 try:
-                    if GEMINI_API_KEY:
-                        new_full_text = extract_full_text_with_gemini(files)
-                    else:
-                        new_full_text = ""
+                    # Build full text from the extraction result instead of a separate AI call
+                    text_parts = []
+                    for f in files:
+                        text_parts.append(f"--- {f['filename']} ---")
+                    if new_extraction.get("key_terms"):
+                        text_parts.append("Key Terms: " + "; ".join(str(t) for t in new_extraction["key_terms"]))
+                    if new_extraction.get("parties"):
+                        for p in new_extraction["parties"]:
+                            if isinstance(p, dict):
+                                text_parts.append(f"Party: {p.get('name', '')} ({p.get('role', '')})")
+                    if new_extraction.get("risks"):
+                        for r in new_extraction["risks"]:
+                            if isinstance(r, dict):
+                                text_parts.append(f"Risk: {r.get('title', '')} - {r.get('description', '')}")
+                    new_full_text = "\n".join(text_parts)
 
                     if new_full_text:
                         # Get existing full_text and max chunk_index

@@ -8,8 +8,7 @@
   ],
   "functions": {
     "api/index.py": {
-      "maxDuration": 60,
-      "includeFiles": "backend/**"
+      "maxDuration": 120
     }
   }
 }
