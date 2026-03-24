@@ -1614,32 +1614,67 @@ Respond with ONLY valid JSON, no other text."""
                 new_key_terms = parse_json_field(new_extraction.get("key_terms"), [])
                 new_risks = parse_json_field(new_extraction.get("risks"), [])
 
-                # Deduplicate parties by name (case-insensitive)
-                existing_party_names = {p.get("name", "").lower() for p in existing_parties if isinstance(p, dict)}
+                # Fuzzy dedup helper: check if two strings are semantically similar
+                # Uses token overlap — if >60% of significant words match, it's a duplicate
+                def _tokenize(s):
+                    """Extract significant lowercase tokens (len>2) from a string."""
+                    return set(w for w in re.findall(r'[a-zA-Z0-9€$£¥]+', s.lower()) if len(w) > 2)
+
+                def _is_similar(a, b, threshold=0.6):
+                    """Check if two strings are similar using token overlap + substring check."""
+                    a_lower = a.lower().strip()
+                    b_lower = b.lower().strip()
+                    # Exact match
+                    if a_lower == b_lower:
+                        return True
+                    # One is a substring of the other (catches "X per month" vs "X per month for Y")
+                    if a_lower in b_lower or b_lower in a_lower:
+                        return True
+                    tokens_a = _tokenize(a)
+                    tokens_b = _tokenize(b)
+                    if not tokens_a or not tokens_b:
+                        return False
+                    union = tokens_a | tokens_b
+                    if not union:
+                        return True
+                    overlap = len(tokens_a & tokens_b) / len(union)
+                    return overlap >= threshold
+
+                def _has_similar(new_item, existing_items):
+                    """Check if new_item is similar to any item in existing_items."""
+                    for existing in existing_items:
+                        if _is_similar(new_item, existing):
+                            return True
+                    return False
+
+                # Deduplicate parties by name (fuzzy matching)
                 parties_added = 0
                 for p in new_parties:
-                    if isinstance(p, dict) and p.get("name", "").lower() not in existing_party_names:
+                    if not isinstance(p, dict):
+                        continue
+                    new_name = p.get("name", "")
+                    existing_names = [ep.get("name", "") for ep in existing_parties if isinstance(ep, dict)]
+                    if not _has_similar(new_name, existing_names):
                         existing_parties.append(p)
-                        existing_party_names.add(p.get("name", "").lower())
                         parties_added += 1
 
-                # Deduplicate key_terms (case-insensitive strings)
-                existing_terms_set = {t.lower() if isinstance(t, str) else str(t).lower() for t in existing_key_terms}
+                # Deduplicate key_terms (fuzzy matching)
                 terms_added = 0
                 for t in new_key_terms:
-                    t_lower = t.lower() if isinstance(t, str) else str(t).lower()
-                    if t_lower not in existing_terms_set:
+                    t_str = t if isinstance(t, str) else str(t)
+                    if not _has_similar(t_str, [x if isinstance(x, str) else str(x) for x in existing_key_terms]):
                         existing_key_terms.append(t)
-                        existing_terms_set.add(t_lower)
                         terms_added += 1
 
-                # Deduplicate risks by title (case-insensitive)
-                existing_risk_titles = {r.get("title", "").lower() for r in existing_risks if isinstance(r, dict)}
+                # Deduplicate risks by title (fuzzy matching)
                 risks_added = 0
                 for r in new_risks:
-                    if isinstance(r, dict) and r.get("title", "").lower() not in existing_risk_titles:
+                    if not isinstance(r, dict):
+                        continue
+                    new_title = r.get("title", "")
+                    existing_titles = [er.get("title", "") for er in existing_risks if isinstance(er, dict)]
+                    if not _has_similar(new_title, existing_titles):
                         existing_risks.append(r)
-                        existing_risk_titles.add(r.get("title", "").lower())
                         risks_added += 1
 
                 # Update scalar fields only if currently null/empty
