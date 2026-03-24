@@ -302,10 +302,16 @@ For RENTAL contracts - capture ALL of:
   * Permitted use and restrictions
   * Subletting/assignment rights
   * Break clauses and early termination conditions
-For INSURANCE contracts:
-  * Coverage limits and deductibles
+For INSURANCE contracts - capture ALL of:
+  * EVERY coverage type with its specific limit (e.g., "Liability: €2,500,000 per event")
+  * EVERY sub-coverage and sub-limit (e.g., "Jewelry: max €10,000", "Theft-sensitive items: max €15,000")
+  * ALL deductibles per coverage type (e.g., "Storm damage deductible: €250", "Other damages: €0")
+  * Deductible exceptions and exclusions
+  * Premium breakdown per policy/coverage
   * Exclusions and waiting periods
-  * Claim procedures and timeframes
+  * Claim procedures, timeframes, and prior claims declarations
+  * Insured address and property details
+  * Who is covered (policyholder, family, etc.)
 For SAAS/SUBSCRIPTION:
   * User/seat limits and overage charges
   * Data retention and export rights
@@ -319,12 +325,12 @@ FIELD EXTRACTION RULES:
 4. dates: Always use YYYY-MM-DD format
 5. confidence: 0.9+ for clear documents, 0.6-0.8 for partial info, <0.6 for unclear
 
-KEY TERMS EXTRACTION RULES (CONCISE & SCANNABLE):
-Extract key_terms as SHORT, SCANNABLE bullet points. Each term should be:
-- Brief: 10-15 words max, like a bullet point
-- Complete: Include specific numbers/percentages but skip unnecessary words
+KEY TERMS EXTRACTION RULES:
+Extract key_terms as SCANNABLE bullet points. Each term should be:
+- Concise but COMPLETE: Include ALL specific numbers, limits, and amounts — do not omit any coverage item or sub-limit
 - Structured: "Category: value (reference)" format when possible
 - Readable: Plain language, avoid legal jargon
+- IMPORTANT: It is better to have MORE terms with all details than to miss important coverage items. Extract EVERY distinct coverage, limit, deductible, and condition as its own term.
 
 FORMAT: "[Topic]: [Key info] ([Article/Section ref])"
 
