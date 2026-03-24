@@ -111,11 +111,20 @@ export default function ContractQA({ contractId }: ContractQAProps) {
                 Citations from contract:
               </h4>
               <ul className="space-y-2">
-                {answer.citations.map((citation, i) => (
-                  <li key={i} className="text-sm text-gray-600 bg-yellow-50 border border-yellow-100 rounded px-3 py-2">
-                    "{citation}"
-                  </li>
-                ))}
+                {answer.citations.map((citation, i) => {
+                  const text = typeof citation === 'string' ? citation : citation.text
+                  const page = typeof citation === 'string' ? null : citation.page
+                  return (
+                    <li key={i} className="text-sm text-gray-600 bg-yellow-50 border border-yellow-100 rounded px-3 py-2 flex justify-between items-start gap-2">
+                      <span>"{text}"</span>
+                      {page && (
+                        <span className="text-xs font-medium text-gray-500 bg-yellow-100 px-2 py-0.5 rounded whitespace-nowrap">
+                          Page {page}
+                        </span>
+                      )}
+                    </li>
+                  )
+                })}
               </ul>
             </div>
           )}
