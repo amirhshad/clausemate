@@ -19,7 +19,7 @@ export default function Layout({ children }: LayoutProps) {
     { path: '/upload', icon: Upload, label: 'Upload', mobileLabel: 'Upload' },
     { path: '/contracts', icon: FileText, label: 'Contracts', mobileLabel: 'Contracts' },
     { path: '/timeline', icon: Calendar, label: 'Timeline', mobileLabel: 'Timeline' },
-    { path: '/analysis', icon: Search, label: 'Analysis', mobileLabel: 'Analysis' },
+    { path: '/analysis', icon: Search, label: 'Contract Details', mobileLabel: 'Details' },
     { path: '/recommendations', icon: Sparkles, label: 'AI Insights', mobileLabel: 'Insights' },
     { path: '/settings', icon: Settings, label: 'Settings', mobileLabel: 'Settings' },
   ]

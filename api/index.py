@@ -7,6 +7,17 @@ import re
 from urllib.parse import urlparse, parse_qs
 import base64
 import io
+from datetime import datetime, timezone, timedelta
+
+# Sentry error monitoring
+SENTRY_DSN = os.environ.get("SENTRY_DSN", "")
+if SENTRY_DSN:
+    import sentry_sdk
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        traces_sample_rate=0.1,
+        environment=os.environ.get("VERCEL_ENV", "development"),
+    )
 
 # Supabase setup
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -21,6 +32,13 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 
 # Constants
 MAX_FILES_PER_CONTRACT = 5
+
+# Rate limiting: per-user limits for AI-powered endpoints
+RATE_LIMITS = {
+    "/api/upload/extract": {"max_requests": 10, "window_minutes": 60},
+    "/api/recommendations/generate": {"max_requests": 5, "window_minutes": 60},
+    "/api/contracts/query": {"max_requests": 30, "window_minutes": 60},
+}
 
 
 def get_supabase_client(use_service_key=True):
@@ -46,13 +64,57 @@ def parse_authorization(headers):
     return auth
 
 
+def get_rate_limit_key(path):
+    """Map a request path to its rate limit key, or None if not rate-limited."""
+    if path == "/api/upload/extract":
+        return "upload/extract"
+    if path == "/api/recommendations/generate":
+        return "recommendations/generate"
+    if re.match(r"/api/contracts/[^/]+/query", path):
+        return "contracts/query"
+    if re.match(r"/api/contracts/[^/]+/add-files", path):
+        return "upload/extract"  # Share rate limit with extract
+    return None
+
+
+def check_rate_limit(supabase, user_id, rate_key):
+    """Check if user has exceeded rate limit. Returns (allowed, retry_after_seconds)."""
+    config = RATE_LIMITS.get(f"/api/{rate_key}")
+    if not config:
+        return True, None
+
+    window_start = (datetime.now(timezone.utc) - timedelta(minutes=config["window_minutes"])).isoformat()
+
+    try:
+        result = supabase.table("api_rate_limits").select("id", count="exact").eq(
+            "user_id", user_id
+        ).eq("endpoint", rate_key).gte("created_at", window_start).execute()
+
+        count = result.count if result.count is not None else len(result.data or [])
+
+        if count >= config["max_requests"]:
+            return False, config["window_minutes"] * 60
+
+        # Log this request
+        supabase.table("api_rate_limits").insert({
+            "user_id": user_id,
+            "endpoint": rate_key,
+        }).execute()
+
+        return True, None
+    except Exception:
+        # If rate limit table doesn't exist yet, allow the request
+        return True, None
+
+
 def parse_multipart_files(body, content_type):
     """Parse multipart form data and extract all files."""
     files = []
     metadata = None
+    extra_fields = {}
 
     if "multipart/form-data" not in content_type:
-        return files, metadata
+        return files, metadata, extra_fields
 
     boundary = content_type.split("boundary=")[1].encode()
     parts = body.split(b"--" + boundary)
@@ -92,7 +154,13 @@ def parse_multipart_files(body, content_type):
             except:
                 pass
 
-    return files, metadata
+        # Check for full_text field (RAG support)
+        elif b'name="full_text"' in part:
+            header_end = part.find(b"\r\n\r\n")
+            content = part[header_end + 4:].rstrip(b"\r\n--")
+            extra_fields["full_text"] = content.decode("utf-8", errors="replace")
+
+    return files, metadata, extra_fields
 
 
 # Prompt injection detection patterns
@@ -407,9 +475,6 @@ def parse_extraction_result(raw_data: dict) -> dict:
         "complexity": raw_data.get("complexity", "medium"),
         "complexity_reasons": raw_data.get("complexity_reasons", []),
         "documents_analyzed": raw_data.get("documents_analyzed", []),
-        # RAG fields
-        "full_text": raw_data.get("full_text", ""),
-        "chunks": raw_data.get("chunks", []),
     }
 
     # Parse numeric fields
@@ -487,6 +552,37 @@ def strip_json_markdown(text):
     if text.endswith("```"):
         text = text[:-3]
     return text.strip()
+
+
+def chunk_text(text, chunk_size=1000, overlap=100):
+    """Split text into overlapping chunks for RAG. Breaks at sentence boundaries."""
+    if not text:
+        return []
+    chunks = []
+    start = 0
+    text_length = len(text)
+    chunk_index = 0
+    while start < text_length:
+        end = start + chunk_size
+        if end < text_length:
+            for punct in ['. ', '! ', '? ', '\n']:
+                last_punct = text.rfind(punct, start, end)
+                if last_punct > start + chunk_size // 2:
+                    end = last_punct + 1
+                    break
+        chunk = text[start:end].strip()
+        if chunk:
+            chunks.append({
+                "text": chunk,
+                "index": chunk_index,
+                "char_start": start,
+                "char_end": min(end, text_length)
+            })
+            chunk_index += 1
+        start = end - overlap
+        if start <= 0:
+            break
+    return chunks
 
 
 def extract_with_gemini(files, files_metadata, model_name="gemini-3-flash-preview"):
@@ -572,7 +668,7 @@ def extract_with_claude(files, files_metadata):
     })
 
     response = client.messages.create(
-        model="claude-opus-4-20251115",
+        model="claude-sonnet-4-20250514",
         max_tokens=4096,
         messages=[{
             "role": "user",
@@ -582,6 +678,70 @@ def extract_with_claude(files, files_metadata):
 
     result_text = strip_json_markdown(response.content[0].text)
     return json.loads(result_text)
+
+
+def extract_full_text_with_gemini(files):
+    """Extract raw text from PDF files using Gemini Flash. Lightweight call for RAG."""
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-3-flash-preview")
+
+    parts = []
+    for file_data in files:
+        parts.append(f"Document: {file_data['filename']}")
+        parts.append({
+            "mime_type": "application/pdf",
+            "data": file_data["content"]
+        })
+
+    parts.append(
+        "Extract ALL readable text from these documents. Return ONLY a JSON object with a single field: "
+        '{"full_text": "...the complete text..."}. '
+        "For multiple documents, separate with --- [filename] --- headers. "
+        "Preserve paragraph breaks. Include all clauses, articles, terms, and content. "
+        "Return ONLY valid JSON."
+    )
+
+    response = model.generate_content(
+        parts,
+        generation_config={
+            "temperature": 0.0,
+            "max_output_tokens": 8192,
+            "response_mime_type": "application/json"
+        }
+    )
+
+    result_text = strip_json_markdown(response.text)
+    data = json.loads(result_text)
+    return data.get("full_text", "")
+
+
+def answer_with_gemini(prompt, model_name="gemini-3-flash-preview"):
+    """Answer a contract question using Gemini."""
+    import google.generativeai as genai
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel(model_name)
+    response = model.generate_content(
+        prompt,
+        generation_config={
+            "temperature": 0.2,
+            "max_output_tokens": 1024,
+            "response_mime_type": "application/json"
+        }
+    )
+    return strip_json_markdown(response.text)
+
+
+def answer_with_claude(prompt):
+    """Answer a contract question using Claude."""
+    import anthropic
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    message = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=1024,
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return message.content[0].text
 
 
 def generate_recommendations_with_gemini(contracts_summary):
@@ -675,7 +835,7 @@ Focus on:
 Provide 2-5 specific, actionable recommendations per contract. Return ONLY valid JSON."""
 
     response = client.messages.create(
-        model="claude-opus-4-20251115",
+        model="claude-sonnet-4-20250514",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -845,6 +1005,16 @@ class handler(BaseHTTPRequestHandler):
 
         supabase = get_supabase_client()
 
+        # Rate limiting for AI-powered endpoints
+        rate_key = get_rate_limit_key(path)
+        if rate_key:
+            allowed, retry_after = check_rate_limit(supabase, user_id, rate_key)
+            if not allowed:
+                return self.send_json(
+                    {"detail": f"Rate limit exceeded. Try again in {retry_after // 60} minutes."},
+                    429
+                )
+
         # Upload extract - supports multiple files
         if path == "/api/upload/extract":
             try:
@@ -853,7 +1023,7 @@ class handler(BaseHTTPRequestHandler):
                 content_type = self.headers.get("Content-Type", "")
 
                 # Parse all files from multipart
-                files, files_metadata = parse_multipart_files(body, content_type)
+                files, files_metadata, _ = parse_multipart_files(body, content_type)
 
                 if not files:
                     return self.send_error_json("No files uploaded", 400)
@@ -956,7 +1126,7 @@ class handler(BaseHTTPRequestHandler):
                     return self.send_error_json("Provider name is required", 400)
 
                 # Parse all files from multipart
-                files, files_metadata = parse_multipart_files(body, content_type)
+                files, files_metadata, extra_fields = parse_multipart_files(body, content_type)
 
                 if not files:
                     return self.send_error_json("No files uploaded", 400)
@@ -1003,8 +1173,6 @@ class handler(BaseHTTPRequestHandler):
                     "parties": parties,
                     "risks": risks,
                     "user_verified": True,
-                    # RAG fields
-                    "full_text": extraction.get("full_text", ""),
                 }
 
                 # For backward compatibility, set file_path and file_name from first file
@@ -1017,19 +1185,33 @@ class handler(BaseHTTPRequestHandler):
                 result = supabase.table("contracts").insert(contract_data).execute()
                 contract_id = result.data[0]["id"]
 
-                # Insert text chunks for RAG
-                chunks = extraction.get("chunks", [])
-                if chunks:
-                    for chunk in chunks:
-                        try:
-                            supabase.table("contract_chunks").insert({
+                # Extract full text and create chunks for RAG
+                try:
+                    if GEMINI_API_KEY:
+                        full_text = extract_full_text_with_gemini(files)
+                    else:
+                        full_text = ""
+
+                    if full_text:
+                        # Cap at 100K chars
+                        if len(full_text) > 100000:
+                            full_text = full_text[:100000]
+
+                        supabase.table("contracts").update({
+                            "full_text": full_text
+                        }).eq("id", contract_id).execute()
+
+                        text_chunks = chunk_text(full_text, chunk_size=1000, overlap=100)
+                        if text_chunks:
+                            chunk_records = [{
                                 "contract_id": contract_id,
-                                "chunk_text": chunk.get("text", ""),
-                                "chunk_index": chunk.get("index", 0),
+                                "chunk_text": c["text"],
+                                "chunk_index": c["index"],
                                 "source_file": files[0]["filename"] if files else None,
-                            })
-                        except Exception:
-                            pass  # Skip chunk insertion errors
+                            } for c in text_chunks]
+                            supabase.table("contract_chunks").insert(chunk_records).execute()
+                except Exception:
+                    pass  # RAG extraction failure is non-fatal
 
                 # Upload each file to storage and create contract_files records
                 for i, file_data in enumerate(files):
@@ -1165,72 +1347,6 @@ class handler(BaseHTTPRequestHandler):
                 error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
                 return self.send_error_json(f"Failed to generate recommendations: {error_details}", 500)
 
-        return self.send_error_json("Not found", 404)
-
-    def do_PUT(self):
-        """Handle PUT requests."""
-        path = urlparse(self.path).path
-
-        token = parse_authorization(dict(self.headers))
-        if not token:
-            return self.send_error_json("No token provided", 401)
-
-        try:
-            user_id = get_user_from_token(token)
-        except Exception as e:
-            return self.send_error_json(f"Invalid token: {str(e)}", 401)
-
-        supabase = get_supabase_client()
-
-        # Update recommendation status
-        if path.startswith("/api/recommendations/"):
-            try:
-                rec_id = path.split("/")[-1]
-
-                # Read body
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length)
-                data = json.loads(body.decode()) if body else {}
-
-                status = data.get("status")
-                if status not in ["accepted", "dismissed"]:
-                    return self.send_error_json("Invalid status", 400)
-
-                # Verify ownership
-                existing = supabase.table("recommendations").select("id").eq("id", rec_id).eq("user_id", user_id).single().execute()
-                if not existing.data:
-                    return self.send_error_json("Recommendation not found", 404)
-
-                # Update status
-                result = supabase.table("recommendations").update({
-                    "status": status,
-                    "acted_on_at": "now()"
-                }).eq("id", rec_id).execute()
-
-                return self.send_json(result.data[0] if result.data else {"status": "updated"})
-
-            except Exception as e:
-                import traceback
-                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-                return self.send_error_json(f"Failed to update recommendation: {error_details}", 500)
-
-        return self.send_error_json("Not found", 404)
-
-    def do_DELETE(self):
-        """Handle DELETE requests."""
-        path = urlparse(self.path).path
-
-        token = parse_authorization(dict(self.headers))
-        if not token:
-            return self.send_error_json("No token provided", 401)
-
-        try:
-            user_id = get_user_from_token(token)
-        except Exception as e:
-            return self.send_error_json(f"Invalid token: {str(e)}", 401)
-
-        supabase = get_supabase_client()
-
         # Contract Q&A endpoint
         query_match = re.match(r"/api/contracts/([^/]+)/query", path)
         if query_match:
@@ -1259,7 +1375,7 @@ class handler(BaseHTTPRequestHandler):
             # RAG: Retrieve relevant chunks from the database
             full_text = contract.get("full_text", "")
             chunks = []
-            
+
             # Try to get chunks from contract_chunks table
             try:
                 chunks_result = supabase.table("contract_chunks").select("*").eq("contract_id", contract_id).order("chunk_index").execute()
@@ -1279,11 +1395,11 @@ class handler(BaseHTTPRequestHandler):
                 """Find chunks relevant to the question using keyword matching."""
                 if not chunks:
                     return []
-                
+
                 # Extract keywords from question
                 question_lower = question.lower()
                 keywords = [w for w in question_lower.split() if len(w) > 3]
-                
+
                 # Score each chunk
                 scored = []
                 for i, chunk in enumerate(chunks):
@@ -1295,7 +1411,7 @@ class handler(BaseHTTPRequestHandler):
                     if len(chunk) < 500:
                         score *= 1.2
                     scored.append((i, score, chunk))
-                
+
                 # Sort by score and return top_k
                 scored.sort(key=lambda x: x[1], reverse=True)
                 return [c[2] for c in scored[:top_k] if c[1] > 0]
@@ -1373,40 +1489,338 @@ class handler(BaseHTTPRequestHandler):
 
 ## Response Format
 Return a JSON object with:
-- "answer": Your answer to the question
-- "citations": Array of specific quotes/text that support your answer (use the [Section X] format if citing from document)
+- "answer": Your answer in plain text (no markdown, no code blocks, no JSON formatting - just natural language)
+- "citations": Array of objects, each with "text" (the supporting quote) and "page" (page number if known, or null)
+
+Example:
+{{"answer": "The contract auto-renews annually unless cancelled 30 days prior.", "citations": [{{"text": "This agreement shall automatically renew for successive 1-year terms", "page": 3}}]}}
 
 Respond with ONLY valid JSON, no other text."""
 
-            # Call Claude API
+            # Smart routing: Gemini primary, Claude fallback
             try:
-                import anthropic
-                client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+                if GEMINI_API_KEY:
+                    try:
+                        response_text = answer_with_gemini(prompt)
+                    except Exception:
+                        if ANTHROPIC_API_KEY:
+                            response_text = answer_with_claude(prompt)
+                        else:
+                            raise
+                elif ANTHROPIC_API_KEY:
+                    response_text = answer_with_claude(prompt)
+                else:
+                    return self.send_error_json("No AI provider configured", 500)
 
-                message = client.messages.create(
-                    model="claude-opus-4-20251115",
-                    max_tokens=1024,
-                    messages=[
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-
-                response_text = message.content[0].text
-
-                # Parse the JSON response
+                # Parse the JSON response (strip markdown if present)
                 try:
-                    response_data = json.loads(response_text)
+                    cleaned = strip_json_markdown(response_text)
+                    response_data = json.loads(cleaned)
                     answer = response_data.get("answer", "Sorry, I couldn't parse the answer.")
                     citations = response_data.get("citations", [])
                 except json.JSONDecodeError:
-                    # If JSON parsing fails, return the raw response
-                    answer = response_text
+                    answer = response_text.strip()
+                    if answer.startswith("```"):
+                        answer = strip_json_markdown(answer)
                     citations = []
 
                 return self.send_json({"answer": answer, "citations": citations})
 
             except Exception as e:
                 return self.send_error_json(f"Failed to generate answer: {str(e)}", 500)
+
+        # Add files to existing contract
+        add_files_match = re.match(r"/api/contracts/([^/]+)/add-files", path)
+        if add_files_match:
+            contract_id = add_files_match.group(1)
+            try:
+                # Validate contract ownership
+                contract_result = supabase.table("contracts").select("*").eq("id", contract_id).single().execute()
+                if not contract_result.data:
+                    return self.send_error_json("Contract not found", 404)
+                contract = contract_result.data
+                if contract.get("user_id") != user_id:
+                    return self.send_error_json("Forbidden", 403)
+
+                # Check existing file count
+                existing_files_result = supabase.table("contract_files").select("*").eq("contract_id", contract_id).order("display_order").execute()
+                existing_files = existing_files_result.data or []
+                existing_count = len(existing_files)
+
+                # Parse incoming files
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length)
+                content_type = self.headers.get("Content-Type", "")
+
+                files, files_metadata, _ = parse_multipart_files(body, content_type)
+
+                if not files:
+                    return self.send_error_json("No files uploaded", 400)
+
+                if existing_count + len(files) > MAX_FILES_PER_CONTRACT:
+                    return self.send_error_json(
+                        f"Adding {len(files)} file(s) would exceed the maximum of {MAX_FILES_PER_CONTRACT} files per contract (currently {existing_count})",
+                        400
+                    )
+
+                # Smart AI extraction on new files
+                escalated = False
+                escalation_model = None
+
+                if AI_PROVIDER == "claude" and ANTHROPIC_API_KEY:
+                    raw_data = extract_with_claude(files, files_metadata)
+                elif GEMINI_API_KEY:
+                    raw_data = extract_with_gemini(files, files_metadata, "gemini-3-flash-preview")
+                    initial_extraction = parse_extraction_result(raw_data)
+                    if needs_escalation(initial_extraction):
+                        try:
+                            raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
+                            escalated = True
+                            escalation_model = "gemini-2.5-pro"
+                        except Exception as gemini_error:
+                            if ANTHROPIC_API_KEY:
+                                raw_data = extract_with_claude(files, files_metadata)
+                                escalated = True
+                                escalation_model = "claude-sonnet-4"
+                            else:
+                                raise gemini_error
+                elif ANTHROPIC_API_KEY:
+                    raw_data = extract_with_claude(files, files_metadata)
+                else:
+                    return self.send_error_json("No AI provider configured", 500)
+
+                new_extraction = parse_extraction_result(raw_data)
+
+                # --- Merge extracted data into existing contract ---
+
+                # Helper: parse JSON field that might be stored as a string
+                def parse_json_field(value, default):
+                    if isinstance(value, list):
+                        return value
+                    if isinstance(value, str):
+                        try:
+                            return json.loads(value)
+                        except Exception:
+                            return default
+                    return default if value is None else value
+
+                # Existing lists
+                existing_parties = parse_json_field(contract.get("parties"), [])
+                existing_key_terms = parse_json_field(contract.get("key_terms"), [])
+                existing_risks = parse_json_field(contract.get("risks"), [])
+
+                # New lists from extraction
+                new_parties = parse_json_field(new_extraction.get("parties"), [])
+                new_key_terms = parse_json_field(new_extraction.get("key_terms"), [])
+                new_risks = parse_json_field(new_extraction.get("risks"), [])
+
+                # Deduplicate parties by name (case-insensitive)
+                existing_party_names = {p.get("name", "").lower() for p in existing_parties if isinstance(p, dict)}
+                parties_added = 0
+                for p in new_parties:
+                    if isinstance(p, dict) and p.get("name", "").lower() not in existing_party_names:
+                        existing_parties.append(p)
+                        existing_party_names.add(p.get("name", "").lower())
+                        parties_added += 1
+
+                # Deduplicate key_terms (case-insensitive strings)
+                existing_terms_set = {t.lower() if isinstance(t, str) else str(t).lower() for t in existing_key_terms}
+                terms_added = 0
+                for t in new_key_terms:
+                    t_lower = t.lower() if isinstance(t, str) else str(t).lower()
+                    if t_lower not in existing_terms_set:
+                        existing_key_terms.append(t)
+                        existing_terms_set.add(t_lower)
+                        terms_added += 1
+
+                # Deduplicate risks by title (case-insensitive)
+                existing_risk_titles = {r.get("title", "").lower() for r in existing_risks if isinstance(r, dict)}
+                risks_added = 0
+                for r in new_risks:
+                    if isinstance(r, dict) and r.get("title", "").lower() not in existing_risk_titles:
+                        existing_risks.append(r)
+                        existing_risk_titles.add(r.get("title", "").lower())
+                        risks_added += 1
+
+                # Update scalar fields only if currently null/empty
+                scalar_fields = ["monthly_cost", "annual_cost", "start_date", "end_date", "cancellation_notice_days"]
+                fields_updated = []
+                scalar_updates = {}
+                for field in scalar_fields:
+                    current_val = contract.get(field)
+                    if current_val is None or current_val == "" or current_val == 0:
+                        new_val = new_extraction.get(field)
+                        if new_val is not None and new_val != "" and new_val != 0:
+                            scalar_updates[field] = new_val
+                            fields_updated.append(field)
+
+                # Build contract update payload
+                update_payload = {
+                    "parties": existing_parties,
+                    "key_terms": existing_key_terms,
+                    "risks": existing_risks,
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+                update_payload.update(scalar_updates)
+
+                supabase.table("contracts").update(update_payload).eq("id", contract_id).execute()
+
+                # --- RAG: extract full text from new files, append chunks ---
+                try:
+                    if GEMINI_API_KEY:
+                        new_full_text = extract_full_text_with_gemini(files)
+                    else:
+                        new_full_text = ""
+
+                    if new_full_text:
+                        # Get existing full_text and max chunk_index
+                        existing_full_text = contract.get("full_text") or ""
+                        combined_full_text = (existing_full_text + "\n\n" + new_full_text).strip()
+                        # Cap at 100K chars
+                        if len(combined_full_text) > 100000:
+                            combined_full_text = combined_full_text[:100000]
+
+                        supabase.table("contracts").update({
+                            "full_text": combined_full_text
+                        }).eq("id", contract_id).execute()
+
+                        # Find max existing chunk_index
+                        existing_chunks_result = supabase.table("contract_chunks").select("chunk_index").eq("contract_id", contract_id).order("chunk_index", desc=True).limit(1).execute()
+                        max_chunk_index = -1
+                        if existing_chunks_result.data:
+                            max_chunk_index = existing_chunks_result.data[0].get("chunk_index", -1)
+
+                        new_chunks = chunk_text(new_full_text, chunk_size=1000, overlap=100)
+                        if new_chunks:
+                            chunk_records = [{
+                                "contract_id": contract_id,
+                                "chunk_text": c["text"],
+                                "chunk_index": max_chunk_index + 1 + c["index"],
+                                "source_file": files[0]["filename"] if files else None,
+                            } for c in new_chunks]
+                            supabase.table("contract_chunks").insert(chunk_records).execute()
+                except Exception:
+                    pass  # RAG extraction failure is non-fatal
+
+                # --- Upload files to storage and create contract_files records ---
+                for i, file_data in enumerate(files):
+                    filename = file_data["filename"]
+                    file_content = file_data["content"]
+
+                    doc_type = "other"
+                    label = filename
+                    if files_metadata and i < len(files_metadata):
+                        doc_type = files_metadata[i].get("document_type", "other")
+                        label = files_metadata[i].get("label", filename)
+
+                    file_path = f"{user_id}/{contract_id}/{filename}"
+
+                    try:
+                        supabase.storage.from_("contracts").upload(
+                            file_path,
+                            file_content,
+                            {"content-type": "application/pdf"}
+                        )
+                    except Exception:
+                        pass  # Ignore upload errors (e.g. already exists)
+
+                    supabase.table("contract_files").insert({
+                        "contract_id": contract_id,
+                        "file_path": file_path,
+                        "file_name": filename,
+                        "file_size_bytes": len(file_content),
+                        "document_type": doc_type,
+                        "label": label,
+                        "display_order": existing_count + i
+                    }).execute()
+
+                # Return updated contract with all files and merge summary
+                updated_contract_result = supabase.table("contracts").select("*").eq("id", contract_id).single().execute()
+                all_files_result = supabase.table("contract_files").select("*").eq("contract_id", contract_id).order("display_order").execute()
+                updated_contract = updated_contract_result.data
+                updated_contract["files"] = all_files_result.data or []
+                updated_contract["merge_summary"] = {
+                    "files_added": len(files),
+                    "parties_added": parties_added,
+                    "terms_added": terms_added,
+                    "risks_added": risks_added,
+                    "fields_updated": fields_updated,
+                    "escalated": escalated,
+                    "escalation_model": escalation_model,
+                }
+
+                return self.send_json(updated_contract)
+
+            except Exception as e:
+                import traceback
+                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+                return self.send_error_json(f"Failed to add files: {error_details}", 500)
+
+        return self.send_error_json("Not found", 404)
+
+    def do_PUT(self):
+        """Handle PUT requests."""
+        path = urlparse(self.path).path
+
+        token = parse_authorization(dict(self.headers))
+        if not token:
+            return self.send_error_json("No token provided", 401)
+
+        try:
+            user_id = get_user_from_token(token)
+        except Exception as e:
+            return self.send_error_json(f"Invalid token: {str(e)}", 401)
+
+        supabase = get_supabase_client()
+
+        # Update recommendation status
+        if path.startswith("/api/recommendations/"):
+            try:
+                rec_id = path.split("/")[-1]
+
+                # Read body
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body.decode()) if body else {}
+
+                status = data.get("status")
+                if status not in ["accepted", "dismissed"]:
+                    return self.send_error_json("Invalid status", 400)
+
+                # Verify ownership
+                existing = supabase.table("recommendations").select("id").eq("id", rec_id).eq("user_id", user_id).single().execute()
+                if not existing.data:
+                    return self.send_error_json("Recommendation not found", 404)
+
+                # Update status
+                result = supabase.table("recommendations").update({
+                    "status": status,
+                    "acted_on_at": "now()"
+                }).eq("id", rec_id).execute()
+
+                return self.send_json(result.data[0] if result.data else {"status": "updated"})
+
+            except Exception as e:
+                import traceback
+                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
+                return self.send_error_json(f"Failed to update recommendation: {error_details}", 500)
+
+        return self.send_error_json("Not found", 404)
+
+    def do_DELETE(self):
+        """Handle DELETE requests."""
+        path = urlparse(self.path).path
+
+        token = parse_authorization(dict(self.headers))
+        if not token:
+            return self.send_error_json("No token provided", 401)
+
+        try:
+            user_id = get_user_from_token(token)
+        except Exception as e:
+            return self.send_error_json(f"Invalid token: {str(e)}", 401)
+
+        supabase = get_supabase_client()
 
         if path.startswith("/api/contracts/"):
             contract_id = path.split("/")[-1]

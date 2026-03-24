@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { useParams, useNavigate, Link } from 'react-router-dom'
 import {
   ArrowLeft,
@@ -9,11 +9,16 @@ import {
   DollarSign,
   Building,
   RefreshCw,
-  Clock
+  Clock,
+  Upload,
+  X,
+  Plus,
+  CheckCircle
 } from 'lucide-react'
-import { getContract, getContracts } from '../lib/api'
+import { getContract, getContracts, addContractFiles } from '../lib/api'
 import ContractQA from '../components/ContractQA'
-import type { Contract, ContractParty, ContractRisk } from '../types'
+import type { Contract, ContractParty, ContractRisk, UploadFile, DocumentType, MergeSummary, AddFilesResponse } from '../types'
+import { DOCUMENT_TYPE_OPTIONS } from '../types'
 
 export default function ContractDetail() {
   const { id } = useParams<{ id: string }>()
@@ -23,6 +28,11 @@ export default function ContractDetail() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [selectedContractId, setSelectedContractId] = useState<string>(id || '')
+  const [showAddFiles, setShowAddFiles] = useState(false)
+  const [newFiles, setNewFiles] = useState<UploadFile[]>([])
+  const [uploading, setUploading] = useState(false)
+  const [uploadError, setUploadError] = useState<string | null>(null)
+  const [mergeSummary, setMergeSummary] = useState<MergeSummary | null>(null)
 
   useEffect(() => {
     loadContracts()
@@ -56,6 +66,70 @@ export default function ContractDetail() {
       setError(err instanceof Error ? err.message : 'Failed to load contract')
     } finally {
       setLoading(false)
+    }
+  }
+
+  const maxFiles = 5
+  const existingFileCount = contract?.files?.length || 0
+  const remainingSlots = maxFiles - existingFileCount
+
+  const handleFileDrop = useCallback((e: React.DragEvent) => {
+    e.preventDefault()
+    const droppedFiles = Array.from(e.dataTransfer.files).filter(f => f.type === 'application/pdf')
+    addNewFiles(droppedFiles)
+  }, [newFiles, remainingSlots])
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files) {
+      const selected = Array.from(e.target.files).filter(f => f.type === 'application/pdf')
+      addNewFiles(selected)
+      e.target.value = ''
+    }
+  }
+
+  const addNewFiles = (incoming: File[]) => {
+    const available = remainingSlots - newFiles.length
+    const toAdd = incoming.slice(0, Math.max(0, available))
+    const newUploads: UploadFile[] = toAdd.map((file) => {
+      const name = file.name.toLowerCase()
+      let docType: DocumentType = 'other'
+      if (name.includes('sow') || name.includes('statement of work')) docType = 'sow'
+      else if (name.includes('terms') || name.includes('conditions')) docType = 'terms_conditions'
+      else if (name.includes('amendment')) docType = 'amendment'
+      else if (name.includes('addendum')) docType = 'addendum'
+      else if (name.includes('exhibit')) docType = 'exhibit'
+      else if (name.includes('schedule')) docType = 'schedule'
+      return { file, document_type: docType, label: file.name.replace('.pdf', '') }
+    })
+    setNewFiles(prev => [...prev, ...newUploads])
+  }
+
+  const removeFile = (index: number) => {
+    setNewFiles(prev => prev.filter((_, i) => i !== index))
+  }
+
+  const updateFileType = (index: number, docType: DocumentType) => {
+    setNewFiles(prev => prev.map((f, i) => i === index ? { ...f, document_type: docType } : f))
+  }
+
+  const handleAddFiles = async () => {
+    if (!contract || newFiles.length === 0) return
+    setUploading(true)
+    setUploadError(null)
+    setMergeSummary(null)
+    try {
+      const result: AddFilesResponse = await addContractFiles(contract.id, newFiles)
+      setMergeSummary(result.merge_summary)
+      setContract(result)
+      setNewFiles([])
+      setTimeout(() => {
+        setShowAddFiles(false)
+        setMergeSummary(null)
+      }, 3000)
+    } catch (err) {
+      setUploadError(err instanceof Error ? err.message : 'Failed to add files')
+    } finally {
+      setUploading(false)
     }
   }
 
@@ -98,7 +172,7 @@ export default function ContractDetail() {
             <ArrowLeft className="w-5 h-5 text-gray-600" />
           </Link>
           <div>
-            <h1 className="text-2xl font-bold text-gray-900">Contract Analysis</h1>
+            <h1 className="text-2xl font-bold text-gray-900">Contract Details</h1>
             <p className="text-gray-600">View parties, key terms, and risks</p>
           </div>
         </div>
@@ -272,14 +346,25 @@ export default function ContractDetail() {
           </div>
 
           {/* Documents */}
-          {contract.files && contract.files.length > 0 && (
-            <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
-              <div className="flex items-center gap-2 mb-4">
-                <FileText className="w-5 h-5 text-primary-600" />
-                <h3 className="font-semibold text-gray-900">Documents</h3>
-                <span className="ml-auto text-sm text-gray-500">{contract.files.length} files</span>
-              </div>
+          <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6">
+            <div className="flex items-center gap-2 mb-4">
+              <FileText className="w-5 h-5 text-primary-600" />
+              <h3 className="font-semibold text-gray-900">Documents</h3>
+              <span className="ml-auto text-sm text-gray-500">
+                {contract.files?.length || 0} files
+              </span>
+              {remainingSlots > 0 && (
+                <button
+                  onClick={() => setShowAddFiles(true)}
+                  className="ml-2 flex items-center gap-1 px-3 py-1.5 text-sm font-medium text-primary-700 bg-primary-50 hover:bg-primary-100 rounded-md transition-colors"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Documents
+                </button>
+              )}
+            </div>
 
+            {contract.files && contract.files.length > 0 ? (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                 {contract.files.map((file) => (
                   <div key={file.id} className="flex items-center gap-3 p-3 bg-gray-50 rounded-md">
@@ -293,6 +378,111 @@ export default function ContractDetail() {
                     </div>
                   </div>
                 ))}
+              </div>
+            ) : (
+              <p className="text-gray-500 text-sm">No documents uploaded yet.</p>
+            )}
+          </div>
+
+          {/* Add Documents Modal */}
+          {showAddFiles && (
+            <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+              <div className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] overflow-y-auto">
+                <div className="flex items-center justify-between p-4 border-b">
+                  <h3 className="text-lg font-semibold">Add Documents to {contract.contract_nickname || contract.provider_name}</h3>
+                  <button onClick={() => { setShowAddFiles(false); setNewFiles([]); setUploadError(null); setMergeSummary(null) }} className="p-1 hover:bg-gray-100 rounded">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+
+                <div className="p-4 space-y-4">
+                  {mergeSummary && (
+                    <div className="bg-green-50 border border-green-200 rounded-md p-4">
+                      <div className="flex items-center gap-2 text-green-800 font-medium mb-2">
+                        <CheckCircle className="w-5 h-5" />
+                        Documents added successfully
+                      </div>
+                      <ul className="text-sm text-green-700 space-y-1">
+                        <li>{mergeSummary.files_added} file(s) uploaded</li>
+                        {mergeSummary.parties_added > 0 && <li>{mergeSummary.parties_added} new party/parties found</li>}
+                        {mergeSummary.terms_added > 0 && <li>{mergeSummary.terms_added} new key term(s) found</li>}
+                        {mergeSummary.risks_added > 0 && <li>{mergeSummary.risks_added} new risk(s) identified</li>}
+                        {mergeSummary.fields_updated.length > 0 && <li>Updated: {mergeSummary.fields_updated.join(', ')}</li>}
+                        {mergeSummary.escalated && <li>Enhanced analysis with {mergeSummary.escalation_model}</li>}
+                      </ul>
+                    </div>
+                  )}
+
+                  {!mergeSummary && (
+                    <>
+                      <div
+                        onDrop={handleFileDrop}
+                        onDragOver={(e) => e.preventDefault()}
+                        className="border-2 border-dashed border-gray-300 rounded-lg p-6 text-center hover:border-primary-400 transition-colors cursor-pointer"
+                        onClick={() => document.getElementById('add-files-input')?.click()}
+                      >
+                        <Upload className="w-8 h-8 text-gray-400 mx-auto mb-2" />
+                        <p className="text-sm font-medium text-gray-700">Drop PDFs here or click to browse</p>
+                        <p className="text-xs text-gray-500 mt-1">Up to {remainingSlots - newFiles.length} more file(s) allowed</p>
+                        <input
+                          id="add-files-input"
+                          type="file"
+                          accept=".pdf"
+                          multiple
+                          className="hidden"
+                          onChange={handleFileSelect}
+                        />
+                      </div>
+
+                      {newFiles.length > 0 && (
+                        <div className="space-y-2">
+                          {newFiles.map((f, i) => (
+                            <div key={i} className="flex items-center gap-2 p-2 bg-gray-50 rounded-md">
+                              <FileText className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                              <span className="text-sm text-gray-900 truncate flex-1">{f.file.name}</span>
+                              <select
+                                value={f.document_type}
+                                onChange={(e) => updateFileType(i, e.target.value as DocumentType)}
+                                className="text-xs border border-gray-200 rounded px-2 py-1"
+                              >
+                                {DOCUMENT_TYPE_OPTIONS.map(opt => (
+                                  <option key={opt.value} value={opt.value}>{opt.label}</option>
+                                ))}
+                              </select>
+                              <button onClick={() => removeFile(i)} className="p-1 hover:bg-gray-200 rounded">
+                                <X className="w-4 h-4 text-gray-500" />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      {uploadError && (
+                        <div className="bg-red-50 border border-red-200 text-red-700 text-sm px-3 py-2 rounded-md">
+                          {uploadError}
+                        </div>
+                      )}
+
+                      <button
+                        onClick={handleAddFiles}
+                        disabled={newFiles.length === 0 || uploading}
+                        className="w-full py-2 px-4 bg-primary-600 text-white rounded-md font-medium hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors flex items-center justify-center gap-2"
+                      >
+                        {uploading ? (
+                          <>
+                            <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white"></div>
+                            Analyzing & merging...
+                          </>
+                        ) : (
+                          <>
+                            <Upload className="w-4 h-4" />
+                            Upload & Analyze ({newFiles.length} file{newFiles.length !== 1 ? 's' : ''})
+                          </>
+                        )}
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
             </div>
           )}

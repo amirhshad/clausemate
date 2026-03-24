@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import type { Contract, ContractSummary, ContractFile, ExtractionResult, Recommendation, UploadFile } from '../types'
+import type { Contract, ContractSummary, ContractFile, ExtractionResult, Recommendation, UploadFile, AddFilesResponse } from '../types'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 
@@ -116,6 +116,11 @@ export async function confirmContracts(
     }))
   ))
 
+  // Add full_text as form field (too large for URL params)
+  if (data.full_text) {
+    formData.append('full_text', data.full_text)
+  }
+
   // Add extraction data as query params
   const params = new URLSearchParams()
   if (data.provider_name) params.append('provider_name', data.provider_name)
@@ -147,6 +152,37 @@ export async function confirmContract(
   data: Partial<ExtractionResult>
 ): Promise<Contract> {
   return confirmContracts([{ file, document_type: 'main_agreement', label: file.name }], data)
+}
+
+export async function addContractFiles(
+  contractId: string,
+  files: UploadFile[]
+): Promise<AddFilesResponse> {
+  const headers = await getAuthHeader()
+  const formData = new FormData()
+
+  files.forEach((uploadFile, index) => {
+    formData.append(`file_${index}`, uploadFile.file)
+  })
+
+  formData.append('files_metadata', JSON.stringify(
+    files.map(f => ({
+      filename: f.file.name,
+      document_type: f.document_type,
+      label: f.label || f.file.name
+    }))
+  ))
+
+  const res = await fetch(`${API_URL}/api/contracts/${contractId}/add-files`, {
+    method: 'POST',
+    headers,
+    body: formData,
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Failed to add files' }))
+    throw new Error(err.detail || 'Failed to add files')
+  }
+  return res.json()
 }
 
 // Recommendations API
@@ -182,9 +218,14 @@ export async function updateRecommendation(
 }
 
 // Contract Q&A API
+export interface ContractCitation {
+  text: string
+  page?: number | null
+}
+
 export interface ContractQueryResponse {
   answer: string
-  citations: string[]
+  citations: (ContractCitation | string)[]
 }
 
 export async function queryContract(

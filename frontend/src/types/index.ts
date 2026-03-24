@@ -90,6 +90,20 @@ export interface Contract {
   file_count?: number
 }
 
+export interface MergeSummary {
+  files_added: number
+  parties_added: number
+  terms_added: number
+  risks_added: number
+  fields_updated: string[]
+  escalated: boolean
+  escalation_model: string | null
+}
+
+export interface AddFilesResponse extends Contract {
+  merge_summary: MergeSummary
+}
+
 export interface ContractSummary {
   total_contracts: number
   total_monthly_spend: number
@@ -134,6 +148,8 @@ export interface ExtractionResult {
   // Smart routing info
   escalated?: boolean
   escalation_model?: string
+  // RAG support
+  full_text?: string
 }
 
 export type RecommendationType =
