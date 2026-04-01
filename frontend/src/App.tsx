@@ -1,4 +1,5 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
+import { Analytics } from '@vercel/analytics/react'
 import { useAuth } from './hooks/useAuth'
 import Login from './pages/Login'
 import Landing from './pages/Landing'
@@ -25,29 +26,35 @@ function App() {
   // Public routes (no auth required)
   if (!user) {
     return (
-      <Routes>
-        <Route path="/" element={<Landing />} />
-        <Route path="/login" element={<Login />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+      <>
+        <Routes>
+          <Route path="/" element={<Landing />} />
+          <Route path="/login" element={<Login />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+        <Analytics />
+      </>
     )
   }
 
   // Authenticated routes
   return (
-    <Layout>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/upload" element={<Upload />} />
-        <Route path="/contracts" element={<Contracts />} />
-        <Route path="/contracts/:id/analysis" element={<ContractDetail />} />
-        <Route path="/analysis" element={<ContractDetail />} />
-        <Route path="/timeline" element={<Timeline />} />
-        <Route path="/recommendations" element={<Recommendations />} />
-        <Route path="/settings" element={<Settings />} />
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
-    </Layout>
+    <>
+      <Layout>
+        <Routes>
+          <Route path="/" element={<Dashboard />} />
+          <Route path="/upload" element={<Upload />} />
+          <Route path="/contracts" element={<Contracts />} />
+          <Route path="/contracts/:id/analysis" element={<ContractDetail />} />
+          <Route path="/analysis" element={<ContractDetail />} />
+          <Route path="/timeline" element={<Timeline />} />
+          <Route path="/recommendations" element={<Recommendations />} />
+          <Route path="/settings" element={<Settings />} />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Layout>
+      <Analytics />
+    </>
   )
 }
 
