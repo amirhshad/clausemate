@@ -6,6 +6,9 @@ export default {
   ],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', '-apple-system', 'sans-serif'],
+      },
       colors: {
         primary: {
           50: '#f0f9ff',
@@ -18,6 +21,15 @@ export default {
           700: '#0369a1',
           800: '#075985',
           900: '#0c4a6e',
+        },
+        navy: {
+          900: '#0f172a',
+          950: '#0a1628',
+        },
+        accent: {
+          400: '#818cf8',
+          500: '#6366f1',
+          600: '#4f46e5',
         },
       },
     },
