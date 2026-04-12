@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { getContract, getContracts, addContractFiles, deleteContractFile } from '../lib/api'
 import ContractQA from '../components/ContractQA'
+import SkillsPanel from '../components/SkillsPanel'
 import type { Contract, ContractParty, ContractRisk, UploadFile, DocumentType, MergeSummary, AddFilesResponse } from '../types'
 import { DOCUMENT_TYPE_OPTIONS } from '../types'
 
@@ -580,6 +581,9 @@ export default function ContractDetail() {
               </div>
             </div>
           )}
+
+          {/* AI Skills */}
+          <SkillsPanel contractId={contract.id} />
 
           {/* Q&A Section */}
           <ContractQA contractId={contract.id} />

@@ -38,6 +38,8 @@ RATE_LIMITS = {
     "/api/upload/extract": {"max_requests": 10, "window_minutes": 60},
     "/api/recommendations/generate": {"max_requests": 5, "window_minutes": 60},
     "/api/contracts/query": {"max_requests": 30, "window_minutes": 60},
+    "/api/contracts/analyze": {"max_requests": 15, "window_minutes": 60},
+    "/api/portfolio/analyze": {"max_requests": 5, "window_minutes": 60},
 }
 
 
@@ -750,6 +752,378 @@ def answer_with_claude(prompt):
     return message.content[0].text
 
 
+def run_ai_analysis(prompt, max_tokens=2048):
+    """Run AI analysis with Claude primary, Gemini fallback. Returns (result_text, model_used)."""
+    if ANTHROPIC_API_KEY:
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+            message = client.messages.create(
+                model="claude-sonnet-4.6-6-20250514",
+                max_tokens=max_tokens,
+                temperature=0.1,
+                messages=[{"role": "user", "content": prompt}]
+            )
+            return message.content[0].text, "claude-sonnet-4.6"
+        except Exception:
+            if GEMINI_API_KEY:
+                import google.generativeai as genai
+                genai.configure(api_key=GEMINI_API_KEY)
+                model = genai.GenerativeModel("gemini-2.5-pro")
+                response = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens, "temperature": 0.1})
+                return response.text, "gemini-2.5-pro"
+            raise
+    elif GEMINI_API_KEY:
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-pro")
+        response = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens, "temperature": 0.1})
+        return response.text, "gemini-2.5-pro"
+    raise ValueError("No AI provider configured")
+
+
+# ---------------------------------------------------------------------------
+# AI Skill Prompt Builders
+# ---------------------------------------------------------------------------
+
+def build_clause_classification_prompt(contract):
+    full_text = contract.get("full_text") or ""
+    key_terms = contract.get("key_terms") or []
+    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None available"
+    return f"""You are a legal analyst classifying contract clauses. Identify and categorize each distinct clause.
+
+CONTRACT TEXT:
+{full_text[:8000]}
+
+EXISTING KEY TERMS:
+{terms_str}
+
+Categorize each clause into: liability, indemnification, termination, force_majeure, confidentiality, ip, payment, renewal, warranty, dispute_resolution, data_protection, other.
+
+Return ONLY valid JSON:
+{{"clauses": [{{"text": "Brief clause summary (max 100 chars)", "category": "category", "subcategory": "optional specific label", "article_ref": "Section ref or null"}}]}}"""
+
+
+def build_language_detection_prompt(contract):
+    full_text = contract.get("full_text") or ""
+    return f"""You are a multilingual contract analyst. Analyze this contract text.
+
+CONTRACT TEXT:
+{full_text[:8000]}
+
+Tasks:
+1. Detect the primary language
+2. For each major section, provide original text and English translation
+
+Focus on: payment terms, obligations, cancellation, renewal, coverage, exclusions, liability.
+
+Return ONLY valid JSON:
+{{"detected_language": "e.g. Dutch", "language_code": "e.g. nl", "sections": [{{"original_text": "First 200 chars of section", "english_translation": "Translation", "section_ref": "Article/Section number or null"}}]}}"""
+
+
+def build_obligation_extraction_prompt(contract):
+    full_text = contract.get("full_text") or ""
+    parties = contract.get("parties") or []
+    key_terms = contract.get("key_terms") or []
+    parties_str = "\n".join(f"- {p.get('name', 'Unknown')} ({p.get('role', 'unknown')})" for p in parties if isinstance(p, dict)) if parties else "Not specified"
+    terms_str = "\n".join(f"- {t}" for t in key_terms[:15]) if key_terms else "None"
+    return f"""You are a contract analyst extracting obligations. Separate into: what the customer must do vs what the provider must do.
+
+PARTIES:
+{parties_str}
+
+CONTRACT TEXT:
+{full_text[:8000]}
+
+KEY TERMS:
+{terms_str}
+
+Return ONLY valid JSON:
+{{"your_obligations": [{{"description": "Clear obligation", "deadline": "Timeframe or null", "article_ref": "Ref or null", "category": "payment|notice|compliance|reporting|maintenance|other"}}], "provider_obligations": [{{"description": "...", "deadline": "...", "article_ref": "...", "category": "service_delivery|sla|maintenance|communication|other"}}]}}"""
+
+
+def build_financial_modeling_prompt(contract):
+    key_terms = contract.get("key_terms") or []
+    full_text = contract.get("full_text") or ""
+    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None"
+    return f"""You are a financial analyst modeling contract costs over its lifetime.
+
+CONTRACT DATA:
+- Monthly cost: {contract.get('monthly_cost')}
+- Annual cost: {contract.get('annual_cost')}
+- Currency: {contract.get('currency', 'USD')}
+- Start date: {contract.get('start_date')}
+- End date: {contract.get('end_date')}
+- Payment frequency: {contract.get('payment_frequency')}
+
+KEY TERMS (look for escalation clauses):
+{terms_str}
+
+CONTRACT TEXT (search for price adjustments):
+{full_text[:6000]}
+
+If CPI-based increases: assume 3% annual CPI. If indefinite duration: model for 5 years.
+
+Return ONLY valid JSON:
+{{"base_annual_cost": 1200.00, "currency": "EUR", "escalation_type": "cpi_plus_fixed|cpi|fixed_percentage|none", "escalation_details": "Description of escalation mechanism", "yearly_projections": [{{"year": 1, "estimated_cost": 1200.00, "increase_pct": 0}}], "total_lifetime_cost": 7500.00, "contract_duration_years": 5}}"""
+
+
+def build_contract_comparison_prompt(contracts_list):
+    parts = []
+    for i, c in enumerate(contracts_list):
+        key_terms = c.get("key_terms") or []
+        risks = c.get("risks") or []
+        terms_str = "\n    ".join(f"- {t}" for t in key_terms[:8]) if key_terms else "    None"
+        risks_str = "\n    ".join(f"- {r.get('title', '')} ({r.get('severity', '')})" for r in risks if isinstance(r, dict)) if risks else "    None"
+        parts.append(f"""CONTRACT {i+1}: {c.get('contract_nickname') or c.get('provider_name')} ({c.get('provider_name')})
+    Type: {c.get('contract_type')}
+    Monthly cost: {c.get('monthly_cost')} {c.get('currency', 'USD')}
+    Annual cost: {c.get('annual_cost')} {c.get('currency', 'USD')}
+    Duration: {c.get('start_date')} to {c.get('end_date')}
+    Auto-renewal: {c.get('auto_renewal')}
+    Cancellation notice: {c.get('cancellation_notice_days')} days
+    Key terms:
+    {terms_str}
+    Risks:
+    {risks_str}""")
+    contracts_text = "\n\n".join(parts)
+    ids = [c.get("id", "") for c in contracts_list]
+    return f"""You are a contract comparison analyst. Compare these {len(contracts_list)} contracts side by side.
+
+{contracts_text}
+
+Compare across: cost, duration, flexibility (cancellation), risk level, coverage/scope, renewal terms.
+
+Return ONLY valid JSON:
+{{"contract_ids": {json.dumps(ids)}, "contracts_compared": [{{"contract_id": "id", "provider": "name", "nickname": "name"}}], "comparison_dimensions": [{{"dimension": "Annual Cost", "values": {{"id1": "$1200/yr", "id2": "$1500/yr"}}, "winner": "id1", "notes": "20% cheaper"}}], "recommendation": "Overall recommendation"}}"""
+
+
+def build_negotiation_coach_prompt(contract):
+    key_terms = contract.get("key_terms") or []
+    risks = contract.get("risks") or []
+    full_text = contract.get("full_text") or ""
+    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None"
+    risks_str = "\n".join(f"- {r.get('title', '')}: {r.get('description', '')} ({r.get('severity', '')})" for r in risks if isinstance(r, dict)) if risks else "None"
+    return f"""You are an expert contract negotiation coach. Generate actionable negotiation talking points.
+
+CONTRACT: {contract.get('contract_nickname') or contract.get('provider_name')} with {contract.get('provider_name')}
+Type: {contract.get('contract_type')}
+Cost: {contract.get('monthly_cost')}/month ({contract.get('annual_cost')}/year) {contract.get('currency', 'USD')}
+Duration: {contract.get('start_date')} to {contract.get('end_date')}
+Auto-renewal: {contract.get('auto_renewal')}, {contract.get('cancellation_notice_days')} day notice
+
+Key terms:
+{terms_str}
+
+Risks:
+{risks_str}
+
+Contract excerpt:
+{full_text[:4000]}
+
+Return ONLY valid JSON:
+{{"talking_points": [{{"topic": "Price Escalation", "current_term": "What it says now", "suggested_position": "What to ask for", "reasoning": "Why you have leverage", "priority": "high|medium|low"}}], "overall_leverage": "strong|moderate|weak", "leverage_reasoning": "Explanation"}}"""
+
+
+def build_clause_risk_scoring_prompt(contract):
+    full_text = contract.get("full_text") or ""
+    key_terms = contract.get("key_terms") or []
+    risks = contract.get("risks") or []
+    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None"
+    risks_str = "\n".join(f"- {r.get('title', '')}: {r.get('description', '')}" for r in risks if isinstance(r, dict)) if risks else "None"
+    return f"""You are a legal risk analyst. Score individual clauses from 1 (minimal risk) to 10 (severe risk).
+
+CONTRACT TEXT:
+{full_text[:8000]}
+
+EXISTING RISK ASSESSMENT:
+{risks_str}
+
+KEY TERMS:
+{terms_str}
+
+Focus on: liability caps, indemnification, termination penalties, auto-renewal, price escalation, data handling, IP, non-compete, exclusions.
+
+Return ONLY valid JSON:
+{{"scored_clauses": [{{"clause_text": "Summary max 150 chars", "clause_type": "liability_cap", "risk_score": 8, "risk_factors": ["Factor 1"], "mitigation_suggestion": "How to mitigate", "article_ref": "Section ref or null"}}], "overall_risk_score": 6.5}}"""
+
+
+def build_renewal_decision_prompt(contract):
+    key_terms = contract.get("key_terms") or []
+    risks = contract.get("risks") or []
+    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None"
+    risks_str = "\n".join(f"- {r.get('title', '')}: {r.get('description', '')}" for r in risks if isinstance(r, dict)) if risks else "None"
+    end_date = contract.get("end_date")
+    days_remaining = None
+    cancellation_deadline = None
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+            days_remaining = (end_dt - datetime.now()).days
+            notice = contract.get("cancellation_notice_days") or 0
+            if notice:
+                cancel_dt = end_dt - timedelta(days=notice)
+                cancellation_deadline = cancel_dt.strftime("%Y-%m-%d")
+        except Exception:
+            pass
+    return f"""You are a contract renewal advisor. Recommend: RENEW, RENEGOTIATE, or CANCEL.
+
+CONTRACT: {contract.get('contract_nickname') or contract.get('provider_name')} with {contract.get('provider_name')}
+Type: {contract.get('contract_type')}
+Cost: {contract.get('monthly_cost')}/month ({contract.get('annual_cost')}/year) {contract.get('currency', 'USD')}
+Duration: {contract.get('start_date')} to {end_date}
+Auto-renewal: {contract.get('auto_renewal')}
+Cancellation notice: {contract.get('cancellation_notice_days')} days
+Today: {datetime.now().strftime('%Y-%m-%d')}
+Days until end: {days_remaining}
+Cancellation deadline: {cancellation_deadline}
+
+Key terms:
+{terms_str}
+
+Risks:
+{risks_str}
+
+Return ONLY valid JSON:
+{{"recommendation": "renew|renegotiate|cancel", "confidence": 0.85, "reasoning": "Detailed explanation", "key_factors": [{{"factor": "Price", "impact": "positive|negative|neutral", "detail": "Explanation"}}], "action_items": ["Action 1"], "days_until_deadline": {days_remaining or 'null'}}}"""
+
+
+def build_portfolio_insights_prompt(contracts_list):
+    total_monthly = sum(c.get("monthly_cost") or 0 for c in contracts_list)
+    summaries = []
+    details = []
+    for c in contracts_list:
+        summaries.append(f"- {c.get('contract_nickname') or c.get('provider_name')} ({c.get('provider_name')}): {c.get('contract_type')}, {c.get('monthly_cost')}/mo, expires {c.get('end_date')}")
+        terms = c.get("key_terms") or []
+        terms_str = "\n  ".join(f"- {t}" for t in terms[:5]) if terms else "  None"
+        details.append(f"Contract: {c.get('contract_nickname') or c.get('provider_name')}\n  {terms_str}")
+    return f"""You are a contract portfolio analyst. Analyze this complete portfolio.
+
+PORTFOLIO ({len(contracts_list)} contracts, {total_monthly}/month):
+{chr(10).join(summaries)}
+
+DETAILED TERMS:
+{chr(10).join(details)}
+
+Analyze for: overlapping coverages, vendor consolidation, spending distribution, concerning terms.
+
+Return ONLY valid JSON:
+{{"total_contracts": {len(contracts_list)}, "total_annual_spend": 15000.00, "spending_by_type": {{"insurance": 5000}}, "overlapping_coverages": [{{"description": "Both cover X", "contracts": ["id1", "id2"], "potential_savings": 500}}], "vendor_consolidation_opportunities": [{{"description": "Consolidate X", "contracts": ["id1"]}}], "spending_trends": "Analysis", "key_insight": "Most important finding"}}"""
+
+
+def build_anomaly_detection_prompt(contracts_list):
+    summaries = []
+    for c in contracts_list:
+        terms = c.get("key_terms") or []
+        terms_str = "; ".join(terms[:3]) if terms else "None"
+        summaries.append(f"- {c.get('id')}: {c.get('contract_nickname') or c.get('provider_name')} ({c.get('provider_name')}), {c.get('contract_type')}, {c.get('monthly_cost')}/mo, {c.get('annual_cost')}/yr, terms: {terms_str}")
+    return f"""You are a contract anomaly detection system. Identify outliers and unusual patterns.
+
+PORTFOLIO:
+{chr(10).join(summaries)}
+
+Flag: pricing above market rates, unusual terms, very short cancellation notice, missing expected terms, duration outliers.
+
+If no anomalies, return {{"anomalies": []}} -- do NOT fabricate issues.
+
+Return ONLY valid JSON:
+{{"anomalies": [{{"contract_id": "uuid", "provider": "Name", "anomaly_type": "pricing|terms|duration|missing_terms", "description": "What's unusual", "severity": "high|medium|low", "benchmark": "Typical range"}}]}}"""
+
+
+def build_compliance_check_prompt(contracts_list, rules=None):
+    if not rules:
+        rules = [
+            "Cancellation notice should not exceed 30 days",
+            "Auto-renewal contracts should provide at least 60 days notice",
+            "No contract should lock in for more than 3 years without break clause",
+            "All contracts should have clear termination provisions"
+        ]
+    rules_str = "\n".join(f"- {r}" for r in rules)
+    summaries = []
+    for c in contracts_list:
+        terms = c.get("key_terms") or []
+        terms_str = "\n    ".join(f"- {t}" for t in terms[:10]) if terms else "    None"
+        summaries.append(f"""Contract: {c.get('contract_nickname') or c.get('provider_name')} (ID: {c.get('id')})
+    Provider: {c.get('provider_name')}
+    Type: {c.get('contract_type')}
+    Auto-renewal: {c.get('auto_renewal')}, {c.get('cancellation_notice_days')} day notice
+    Duration: {c.get('start_date')} to {c.get('end_date')}
+    Terms:
+    {terms_str}""")
+    return f"""You are a compliance auditor checking contracts against rules.
+
+RULES TO CHECK:
+{rules_str}
+
+CONTRACTS:
+{chr(10).join(summaries)}
+
+For each rule, check every contract. Report pass/fail/warning.
+
+Return ONLY valid JSON:
+{{"rules_checked": [{{"rule": "Rule text", "status": "pass|fail|warning", "affected_contracts": [{{"id": "uuid", "provider": "Name"}}], "detail": "Explanation"}}], "overall_compliance": "compliant|issues_found"}}"""
+
+
+def build_contract_summarization_prompt(contract):
+    full_text = contract.get("full_text") or ""
+    key_terms = contract.get("key_terms") or []
+    risks = contract.get("risks") or []
+    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None"
+    risks_str = "\n".join(f"- {r.get('title', '')}: {r.get('description', '')}" for r in risks if isinstance(r, dict)) if risks else "None"
+    return f"""You are a contract summarizer. Write a clear, plain-English summary.
+
+CONTRACT: {contract.get('contract_nickname') or contract.get('provider_name')} with {contract.get('provider_name')} ({contract.get('contract_type')})
+Duration: {contract.get('start_date')} to {contract.get('end_date')}
+Cost: {contract.get('monthly_cost')}/mo ({contract.get('annual_cost')}/yr) {contract.get('currency', 'USD')}
+
+FULL TEXT:
+{full_text[:6000]}
+
+KEY TERMS:
+{terms_str}
+
+RISKS:
+{risks_str}
+
+Return ONLY valid JSON:
+{{"summary": "3-5 sentence plain English summary", "key_points": ["Point 1", "Point 2"], "plain_english_tldr": "One sentence TL;DR"}}"""
+
+
+# Skill dispatcher configuration
+SKILL_BUILDERS = {
+    "clause_classification": build_clause_classification_prompt,
+    "language_detection": build_language_detection_prompt,
+    "obligation_extraction": build_obligation_extraction_prompt,
+    "financial_modeling": build_financial_modeling_prompt,
+    "negotiation_coach": build_negotiation_coach_prompt,
+    "clause_risk_scoring": build_clause_risk_scoring_prompt,
+    "renewal_decision": build_renewal_decision_prompt,
+    "contract_summarization": build_contract_summarization_prompt,
+}
+
+PORTFOLIO_SKILL_BUILDERS = {
+    "contract_comparison": build_contract_comparison_prompt,
+    "portfolio_insights": build_portfolio_insights_prompt,
+    "anomaly_detection": build_anomaly_detection_prompt,
+    "compliance_check": build_compliance_check_prompt,
+}
+
+SKILL_MAX_TOKENS = {
+    "clause_classification": 2048,
+    "language_detection": 4096,
+    "obligation_extraction": 2048,
+    "financial_modeling": 1024,
+    "contract_comparison": 2048,
+    "negotiation_coach": 2048,
+    "clause_risk_scoring": 2048,
+    "renewal_decision": 1024,
+    "portfolio_insights": 2048,
+    "anomaly_detection": 1024,
+    "compliance_check": 1024,
+    "contract_summarization": 1024,
+}
+
+
 def generate_recommendations_with_gemini(contracts_summary):
     """Generate recommendations using Gemini."""
     import google.generativeai as genai
@@ -982,6 +1356,18 @@ class handler(BaseHTTPRequestHandler):
             # Also fetch files for this contract
             files_result = supabase.table("contract_files").select("*").eq("contract_id", contract_id).order("display_order").execute()
             result.data["files"] = files_result.data
+            return self.send_json(result.data)
+
+        # Contract analyses
+        analyses_match = re.match(r"/api/contracts/([^/]+)/analyses", path)
+        if analyses_match:
+            contract_id = analyses_match.group(1)
+            result = supabase.table("contract_analyses").select("*").eq("contract_id", contract_id).eq("user_id", user_id).order("created_at", desc=True).execute()
+            return self.send_json(result.data)
+
+        # Portfolio analyses
+        if path == "/api/portfolio/analyses":
+            result = supabase.table("contract_analyses").select("*").eq("user_id", user_id).is_("contract_id", "null").order("created_at", desc=True).execute()
             return self.send_json(result.data)
 
         # Recommendations
@@ -1783,6 +2169,115 @@ Respond with ONLY valid JSON, no other text."""
                 import traceback
                 error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
                 return self.send_error_json(f"Failed to add files: {error_details}", 500)
+
+        # Run per-contract AI skill
+        analyze_match = re.match(r"/api/contracts/([^/]+)/analyze$", path)
+        if analyze_match:
+            contract_id = analyze_match.group(1)
+            try:
+                # Rate limit
+                allowed, retry_after = check_rate_limit(supabase, user_id, "/api/contracts/analyze")
+                if not allowed:
+                    return self.send_error_json(f"Rate limited. Try again in {retry_after} seconds.", 429)
+
+                # Parse body
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(content_length)) if content_length else {}
+                skill = body.get("skill", "")
+
+                if skill not in SKILL_BUILDERS:
+                    return self.send_error_json(f"Unknown skill: {skill}. Available: {', '.join(SKILL_BUILDERS.keys())}", 400)
+
+                # Fetch contract with ownership check
+                contract_result = supabase.table("contracts").select("*").eq("id", contract_id).single().execute()
+                if not contract_result.data:
+                    return self.send_error_json("Contract not found", 404)
+                contract = contract_result.data
+                if contract.get("user_id") != user_id:
+                    return self.send_error_json("Forbidden", 403)
+
+                # Build prompt and run AI
+                prompt = SKILL_BUILDERS[skill](contract)
+                max_tokens = SKILL_MAX_TOKENS.get(skill, 2048)
+                raw_result, model_used = run_ai_analysis(prompt, max_tokens)
+
+                # Parse JSON result
+                parsed = json.loads(strip_json_markdown(raw_result))
+
+                # Store in DB
+                analysis_record = {
+                    "contract_id": contract_id,
+                    "user_id": user_id,
+                    "skill_type": skill,
+                    "result": parsed,
+                    "model_used": model_used,
+                }
+                insert_result = supabase.table("contract_analyses").insert(analysis_record).execute()
+                return self.send_json(insert_result.data[0] if insert_result.data else analysis_record)
+
+            except json.JSONDecodeError as e:
+                return self.send_error_json(f"Failed to parse AI response: {str(e)}", 500)
+            except Exception as e:
+                import traceback
+                return self.send_error_json(f"Analysis failed: {type(e).__name__}: {str(e)}", 500)
+
+        # Run portfolio AI skill
+        if path == "/api/portfolio/analyze":
+            try:
+                allowed, retry_after = check_rate_limit(supabase, user_id, "/api/portfolio/analyze")
+                if not allowed:
+                    return self.send_error_json(f"Rate limited. Try again in {retry_after} seconds.", 429)
+
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(content_length)) if content_length else {}
+                skill = body.get("skill", "")
+
+                if skill not in PORTFOLIO_SKILL_BUILDERS:
+                    return self.send_error_json(f"Unknown portfolio skill: {skill}. Available: {', '.join(PORTFOLIO_SKILL_BUILDERS.keys())}", 400)
+
+                # Fetch contracts
+                if skill == "contract_comparison":
+                    contract_ids = body.get("contract_ids", [])
+                    if len(contract_ids) < 2:
+                        return self.send_error_json("Need at least 2 contract IDs for comparison", 400)
+                    contracts_result = supabase.table("contracts").select("*").eq("user_id", user_id).in_("id", contract_ids).execute()
+                else:
+                    contracts_result = supabase.table("contracts").select("*").eq("user_id", user_id).execute()
+
+                contracts_list = contracts_result.data or []
+                if not contracts_list:
+                    return self.send_error_json("No contracts found", 404)
+
+                # Build prompt
+                if skill == "compliance_check":
+                    rules = body.get("rules")
+                    prompt = PORTFOLIO_SKILL_BUILDERS[skill](contracts_list, rules)
+                elif skill == "contract_comparison":
+                    prompt = PORTFOLIO_SKILL_BUILDERS[skill](contracts_list)
+                else:
+                    prompt = PORTFOLIO_SKILL_BUILDERS[skill](contracts_list)
+
+                max_tokens = SKILL_MAX_TOKENS.get(skill, 2048)
+                raw_result, model_used = run_ai_analysis(prompt, max_tokens)
+                parsed = json.loads(strip_json_markdown(raw_result))
+
+                # Store - use first contract_id for comparison, null for portfolio
+                store_contract_id = contracts_list[0].get("id") if skill == "contract_comparison" else None
+                analysis_record = {
+                    "contract_id": store_contract_id,
+                    "user_id": user_id,
+                    "skill_type": skill,
+                    "result": parsed,
+                    "model_used": model_used,
+                }
+                insert_result = supabase.table("contract_analyses").insert(analysis_record).execute()
+                return self.send_json(insert_result.data[0] if insert_result.data else analysis_record)
+
+            except json.JSONDecodeError as e:
+                return self.send_error_json(f"Failed to parse AI response: {str(e)}", 500)
+            except Exception as e:
+                import traceback
+                return self.send_error_json(f"Portfolio analysis failed: {type(e).__name__}: {str(e)}", 500)
 
         return self.send_error_json("Not found", 404)
 

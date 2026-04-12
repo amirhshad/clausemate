@@ -205,3 +205,28 @@ export const getCurrencySymbol = (currency: string): string => {
   const found = CURRENCY_OPTIONS.find((c) => c.value === currency)
   return found?.symbol || '$'
 }
+
+// AI Skills
+export type SkillType =
+  | 'clause_classification'
+  | 'language_detection'
+  | 'obligation_extraction'
+  | 'financial_modeling'
+  | 'contract_comparison'
+  | 'negotiation_coach'
+  | 'clause_risk_scoring'
+  | 'renewal_decision'
+  | 'portfolio_insights'
+  | 'anomaly_detection'
+  | 'compliance_check'
+  | 'contract_summarization'
+
+export interface ContractAnalysis {
+  id: string
+  contract_id: string | null
+  user_id: string
+  skill_type: SkillType
+  result: Record<string, unknown>
+  model_used: string | null
+  created_at: string
+}

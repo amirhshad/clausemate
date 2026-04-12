@@ -1,5 +1,5 @@
 import { supabase } from './supabase'
-import type { Contract, ContractSummary, ContractFile, ExtractionResult, Recommendation, UploadFile, AddFilesResponse } from '../types'
+import type { Contract, ContractSummary, ContractFile, ExtractionResult, Recommendation, UploadFile, AddFilesResponse, ContractAnalysis } from '../types'
 
 const API_URL = import.meta.env.VITE_API_URL || ''
 
@@ -248,5 +248,55 @@ export async function queryContract(
     body: JSON.stringify({ question }),
   })
   if (!res.ok) throw new Error('Failed to query contract')
+  return res.json()
+}
+
+// AI Skills API
+export async function runContractSkill(
+  contractId: string,
+  skill: string,
+  options?: { contract_ids?: string[]; rules?: string[] }
+): Promise<ContractAnalysis> {
+  const headers = await getAuthHeader()
+  const res = await fetch(`${API_URL}/api/contracts/${contractId}/analyze`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skill, ...options }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Analysis failed' }))
+    throw new Error(err.detail || 'Failed to run analysis')
+  }
+  return res.json()
+}
+
+export async function runPortfolioSkill(
+  skill: string,
+  options?: { contract_ids?: string[]; rules?: string[] }
+): Promise<ContractAnalysis> {
+  const headers = await getAuthHeader()
+  const res = await fetch(`${API_URL}/api/portfolio/analyze`, {
+    method: 'POST',
+    headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skill, ...options }),
+  })
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: 'Analysis failed' }))
+    throw new Error(err.detail || 'Failed to run portfolio analysis')
+  }
+  return res.json()
+}
+
+export async function getContractAnalyses(contractId: string): Promise<ContractAnalysis[]> {
+  const headers = await getAuthHeader()
+  const res = await fetch(`${API_URL}/api/contracts/${contractId}/analyses`, { headers })
+  if (!res.ok) throw new Error('Failed to fetch analyses')
+  return res.json()
+}
+
+export async function getPortfolioAnalyses(): Promise<ContractAnalysis[]> {
+  const headers = await getAuthHeader()
+  const res = await fetch(`${API_URL}/api/portfolio/analyses`, { headers })
+  if (!res.ok) throw new Error('Failed to fetch portfolio analyses')
   return res.json()
 }

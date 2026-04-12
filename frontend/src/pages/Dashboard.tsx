@@ -13,6 +13,7 @@ import { useContracts } from '../hooks/useContracts'
 import { getRecommendations, generateRecommendations } from '../lib/api'
 import type { Recommendation } from '../types'
 import RecommendationCard from '../components/RecommendationCard'
+import PortfolioSkillsPanel from '../components/PortfolioSkillsPanel'
 import SpendingCharts from '../components/SpendingCharts'
 import EmptyState from '../components/EmptyState'
 
@@ -137,6 +138,9 @@ export default function Dashboard() {
 
       {/* Empty State */}
       {contracts.length === 0 && <EmptyState type="dashboard" />}
+
+      {/* Portfolio AI Skills */}
+      {contracts.length > 0 && <PortfolioSkillsPanel />}
 
       {/* Recommendations Section */}
       {contracts.length > 0 && (
