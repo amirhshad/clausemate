@@ -562,6 +562,30 @@ def strip_json_markdown(text):
     return text.strip()
 
 
+def safe_parse_json(text):
+    """Parse JSON from AI response with fallback cleanup for common issues."""
+    cleaned = strip_json_markdown(text)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+    # Remove trailing commas before } or ]
+    import re as _re
+    cleaned = _re.sub(r',\s*([}\]])', r'\1', cleaned)
+    # Remove single-line comments
+    cleaned = _re.sub(r'//[^\n]*', '', cleaned)
+    # Try to extract JSON object/array from surrounding text
+    match = _re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', cleaned)
+    if match:
+        try:
+            return json.loads(match.group(1))
+        except json.JSONDecodeError:
+            # Remove trailing commas again after extraction
+            extracted = _re.sub(r',\s*([}\]])', r'\1', match.group(1))
+            return json.loads(extracted)
+    raise json.JSONDecodeError("No valid JSON found in AI response", cleaned, 0)
+
+
 def chunk_text(text, chunk_size=1000, overlap=100):
     """Split text into overlapping chunks for RAG. Breaks at sentence boundaries."""
     if not text:
@@ -864,8 +888,21 @@ CONTRACT TEXT (search for price adjustments):
 
 If CPI-based increases: assume 3% annual CPI. If indefinite duration: model for 5 years.
 
-Return ONLY valid JSON:
-{{"base_annual_cost": 1200.00, "currency": "EUR", "escalation_type": "cpi_plus_fixed|cpi|fixed_percentage|none", "escalation_details": "Description of escalation mechanism", "yearly_projections": [{{"year": 1, "estimated_cost": 1200.00, "increase_pct": 0}}], "total_lifetime_cost": 7500.00, "contract_duration_years": 5}}"""
+Return ONLY valid JSON with NO comments or extra text. The escalation_type must be exactly one of: "cpi_plus_fixed", "cpi", "fixed_percentage", or "none".
+
+Example format:
+{{
+  "base_annual_cost": 1200.00,
+  "currency": "EUR",
+  "escalation_type": "none",
+  "escalation_details": "No escalation clauses found",
+  "yearly_projections": [
+    {{"year": 1, "estimated_cost": 1200.00, "increase_pct": 0}},
+    {{"year": 2, "estimated_cost": 1200.00, "increase_pct": 0}}
+  ],
+  "total_lifetime_cost": 6000.00,
+  "contract_duration_years": 5
+}}"""
 
 
 def build_contract_comparison_prompt(contracts_list):
@@ -2202,7 +2239,7 @@ Respond with ONLY valid JSON, no other text."""
                 raw_result, model_used = run_ai_analysis(prompt, max_tokens)
 
                 # Parse JSON result
-                parsed = json.loads(strip_json_markdown(raw_result))
+                parsed = safe_parse_json(raw_result)
 
                 # Store in DB
                 analysis_record = {
@@ -2259,7 +2296,7 @@ Respond with ONLY valid JSON, no other text."""
 
                 max_tokens = SKILL_MAX_TOKENS.get(skill, 2048)
                 raw_result, model_used = run_ai_analysis(prompt, max_tokens)
-                parsed = json.loads(strip_json_markdown(raw_result))
+                parsed = safe_parse_json(raw_result)
 
                 # Store - use first contract_id for comparison, null for portfolio
                 store_contract_id = contracts_list[0].get("id") if skill == "contract_comparison" else None
