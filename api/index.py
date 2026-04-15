@@ -1428,6 +1428,18 @@ class handler(BaseHTTPRequestHandler):
             files_result = supabase.table("contract_files").select("*").eq("contract_id", contract_id).order("display_order").execute()
             return self.send_json(files_result.data)
 
+        # Contract analyses (must be before single contract catch-all)
+        analyses_match = re.match(r"/api/contracts/([^/]+)/analyses$", path)
+        if analyses_match:
+            contract_id = analyses_match.group(1)
+            result = supabase.table("contract_analyses").select("*").eq("contract_id", contract_id).eq("user_id", user_id).order("created_at", desc=True).execute()
+            return self.send_json(result.data)
+
+        # Portfolio analyses
+        if path == "/api/portfolio/analyses":
+            result = supabase.table("contract_analyses").select("*").eq("user_id", user_id).is_("contract_id", "null").order("created_at", desc=True).execute()
+            return self.send_json(result.data)
+
         # Single contract endpoint
         if path.startswith("/api/contracts/"):
             contract_id = path.split("/")[-1]
@@ -1438,18 +1450,6 @@ class handler(BaseHTTPRequestHandler):
             # Also fetch files for this contract
             files_result = supabase.table("contract_files").select("*").eq("contract_id", contract_id).order("display_order").execute()
             result.data["files"] = files_result.data
-            return self.send_json(result.data)
-
-        # Contract analyses
-        analyses_match = re.match(r"/api/contracts/([^/]+)/analyses", path)
-        if analyses_match:
-            contract_id = analyses_match.group(1)
-            result = supabase.table("contract_analyses").select("*").eq("contract_id", contract_id).eq("user_id", user_id).order("created_at", desc=True).execute()
-            return self.send_json(result.data)
-
-        # Portfolio analyses
-        if path == "/api/portfolio/analyses":
-            result = supabase.table("contract_analyses").select("*").eq("user_id", user_id).is_("contract_id", "null").order("created_at", desc=True).execute()
             return self.send_json(result.data)
 
         # Recommendations
