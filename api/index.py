@@ -1109,10 +1109,10 @@ PORTFOLIO_SKILL_BUILDERS = {
 SKILL_MAX_TOKENS = {
     "language_detection": 4096,
     "financial_modeling": 4096,
-    "negotiation_coach": 2048,
+    "negotiation_coach": 4096,
     "contract_comparison": 4096,
     "portfolio_insights": 4096,
-    "anomaly_detection": 2048,
+    "anomaly_detection": 4096,
     "compliance_check": 1024,
     "contract_summarization": 1024,
 }
