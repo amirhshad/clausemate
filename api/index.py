@@ -1160,7 +1160,7 @@ SKILL_MAX_TOKENS = {
     "clause_classification": 2048,
     "language_detection": 4096,
     "obligation_extraction": 2048,
-    "financial_modeling": 1024,
+    "financial_modeling": 2048,
     "contract_comparison": 2048,
     "negotiation_coach": 2048,
     "clause_risk_scoring": 2048,
