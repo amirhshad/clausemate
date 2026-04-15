@@ -1113,8 +1113,8 @@ SKILL_MAX_TOKENS = {
     "contract_comparison": 4096,
     "portfolio_insights": 4096,
     "anomaly_detection": 4096,
-    "compliance_check": 1024,
-    "contract_summarization": 1024,
+    "compliance_check": 4096,
+    "contract_summarization": 4096,
 }
 
 
