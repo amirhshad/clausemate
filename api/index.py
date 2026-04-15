@@ -778,6 +778,19 @@ def answer_with_claude(prompt):
 
 def run_ai_analysis(prompt, max_tokens=2048):
     """Run AI analysis with Claude primary, Gemini fallback. Returns (result_text, model_used)."""
+    def _gemini_call(prompt_text, max_tok):
+        import google.generativeai as genai
+        genai.configure(api_key=GEMINI_API_KEY)
+        model = genai.GenerativeModel("gemini-2.5-pro")
+        response = model.generate_content(prompt_text, generation_config={"max_output_tokens": max_tok, "temperature": 0.1})
+        text = ""
+        if response.candidates:
+            for part in response.candidates[0].content.parts:
+                text += part.text
+        if not text and hasattr(response, 'text') and response.text:
+            text = response.text
+        return text, "gemini-2.5-pro"
+
     if ANTHROPIC_API_KEY:
         try:
             import anthropic
@@ -788,21 +801,19 @@ def run_ai_analysis(prompt, max_tokens=2048):
                 temperature=0.1,
                 messages=[{"role": "user", "content": prompt}]
             )
-            return message.content[0].text, "claude-sonnet-4.6"
+            text = message.content[0].text if message.content else ""
+            if text:
+                return text, "claude-sonnet-4.6"
+            # Empty response from Claude, try Gemini
+            if GEMINI_API_KEY:
+                return _gemini_call(prompt, max_tokens)
+            return text, "claude-sonnet-4.6"
         except Exception:
             if GEMINI_API_KEY:
-                import google.generativeai as genai
-                genai.configure(api_key=GEMINI_API_KEY)
-                model = genai.GenerativeModel("gemini-2.5-pro")
-                response = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens, "temperature": 0.1})
-                return response.text, "gemini-2.5-pro"
+                return _gemini_call(prompt, max_tokens)
             raise
     elif GEMINI_API_KEY:
-        import google.generativeai as genai
-        genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.5-pro")
-        response = model.generate_content(prompt, generation_config={"max_output_tokens": max_tokens, "temperature": 0.1})
-        return response.text, "gemini-2.5-pro"
+        return _gemini_call(prompt, max_tokens)
     raise ValueError("No AI provider configured")
 
 
@@ -2238,8 +2249,16 @@ Respond with ONLY valid JSON, no other text."""
                 max_tokens = SKILL_MAX_TOKENS.get(skill, 2048)
                 raw_result, model_used = run_ai_analysis(prompt, max_tokens)
 
+                if not raw_result or not raw_result.strip():
+                    return self.send_error_json("AI returned an empty response. Please try again.", 500)
+
                 # Parse JSON result
-                parsed = safe_parse_json(raw_result)
+                try:
+                    parsed = safe_parse_json(raw_result)
+                except (json.JSONDecodeError, Exception):
+                    # Return truncated raw response for debugging
+                    preview = raw_result[:500] if raw_result else "(empty)"
+                    return self.send_error_json(f"AI returned non-JSON response. Preview: {preview}", 500)
 
                 # Store in DB
                 analysis_record = {
@@ -2251,9 +2270,6 @@ Respond with ONLY valid JSON, no other text."""
                 }
                 insert_result = supabase.table("contract_analyses").insert(analysis_record).execute()
                 return self.send_json(insert_result.data[0] if insert_result.data else analysis_record)
-
-            except json.JSONDecodeError as e:
-                return self.send_error_json(f"Failed to parse AI response: {str(e)}", 500)
             except Exception as e:
                 import traceback
                 return self.send_error_json(f"Analysis failed: {type(e).__name__}: {str(e)}", 500)
@@ -2296,7 +2312,15 @@ Respond with ONLY valid JSON, no other text."""
 
                 max_tokens = SKILL_MAX_TOKENS.get(skill, 2048)
                 raw_result, model_used = run_ai_analysis(prompt, max_tokens)
-                parsed = safe_parse_json(raw_result)
+
+                if not raw_result or not raw_result.strip():
+                    return self.send_error_json("AI returned an empty response. Please try again.", 500)
+
+                try:
+                    parsed = safe_parse_json(raw_result)
+                except (json.JSONDecodeError, Exception):
+                    preview = raw_result[:500] if raw_result else "(empty)"
+                    return self.send_error_json(f"AI returned non-JSON response. Preview: {preview}", 500)
 
                 # Store - use first contract_id for comparison, null for portfolio
                 store_contract_id = contracts_list[0].get("id") if skill == "contract_comparison" else None
@@ -2309,9 +2333,6 @@ Respond with ONLY valid JSON, no other text."""
                 }
                 insert_result = supabase.table("contract_analyses").insert(analysis_record).execute()
                 return self.send_json(insert_result.data[0] if insert_result.data else analysis_record)
-
-            except json.JSONDecodeError as e:
-                return self.send_error_json(f"Failed to parse AI response: {str(e)}", 500)
             except Exception as e:
                 import traceback
                 return self.send_error_json(f"Portfolio analysis failed: {type(e).__name__}: {str(e)}", 500)
