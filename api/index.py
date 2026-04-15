@@ -254,9 +254,19 @@ REQUIRED OUTPUT FORMAT:
         {
             "title": "Short risk title",
             "description": "Why this is a risk and what to watch for",
-            "severity": "high | medium | low"
+            "severity": "high | medium | low",
+            "risk_score": 1-10,
+            "clause_ref": "Article/Section reference if applicable"
         }
     ],
+    "obligations": {
+        "your_obligations": [
+            {"description": "What you must do", "deadline": "timeframe or null", "category": "payment | notice | compliance | reporting | maintenance"}
+        ],
+        "provider_obligations": [
+            {"description": "What provider must do", "deadline": "timeframe or null", "category": "service_delivery | sla | maintenance | communication"}
+        ]
+    },
     "confidence": 0.0-1.0,
     "complexity": "low | medium | high",
     "complexity_reasons": ["List reasons if complexity is high"],
@@ -275,6 +285,13 @@ COMPLEXITY ASSESSMENT:
 - high: Complex legal documents with multiple parties, extensive obligations, unusual clauses,
         cross-references between documents, or ambiguous/contradictory terms
 
+RISK SCORING:
+For each risk, assign a risk_score from 1 (minimal) to 10 (severe):
+- 1-3: Minor inconvenience, standard terms
+- 4-6: Moderate concern, worth monitoring
+- 7-10: Serious risk, needs attention or negotiation
+Include the clause_ref (article/section) when identifiable.
+
 RISK CATEGORIES TO CHECK:
 - Auto-renewal with short/no cancellation window
 - Automatic price increases or escalation clauses
@@ -285,6 +302,9 @@ RISK CATEGORIES TO CHECK:
 - Unusual indemnification requirements
 - Missing SLA or service guarantees
 - Ambiguous scope of services
+
+OBLIGATIONS EXTRACTION:
+Separate obligations into your_obligations (what the customer/subscriber must do) and provider_obligations (what the provider/service party must do). Include deadlines and categories. Focus on: payment duties, notice requirements, compliance obligations, service delivery commitments, maintenance responsibilities.
 
 CONTRACT TYPE GUIDANCE:
 - insurance: Health, auto, home, liability policies
@@ -350,13 +370,15 @@ EXAMPLES of BAD key_terms (too long - DO NOT do this):
 - "Annual rent increases based on the Consumer Price Index as published by CBS plus additional landlord increase of up to 5% per Article 5.2" (TOO VERBOSE)
 - "The tenant must provide thirty days written notice prior to cancellation and will be subject to an early termination fee equivalent to two months rent as specified in Section 12.3" (TOO WORDY)
 
-CATEGORIES to extract (be brief for each):
+CATEGORIES to extract (prefix each term with its category):
 - Payment: Costs, adjustments, escalations
 - Renewal/Exit: Auto-renewal, notice periods, penalties
 - Performance: SLAs, guarantees
 - Liability: Caps, indemnification
 - Rights: IP, data, confidentiality
 - Duration: Term, renewal periods
+- Termination: Break clauses, early exit conditions
+- Force Majeure: Exceptional circumstances provisions
 
 Return ONLY the JSON object. Do not include any other text."""
 
@@ -854,24 +876,6 @@ def run_ai_analysis(prompt, max_tokens=2048):
 # AI Skill Prompt Builders
 # ---------------------------------------------------------------------------
 
-def build_clause_classification_prompt(contract):
-    full_text = contract.get("full_text") or ""
-    key_terms = contract.get("key_terms") or []
-    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None available"
-    return f"""You are a legal analyst classifying contract clauses. Identify and categorize each distinct clause.
-
-CONTRACT TEXT:
-{full_text[:8000]}
-
-EXISTING KEY TERMS:
-{terms_str}
-
-Categorize each clause into: liability, indemnification, termination, force_majeure, confidentiality, ip, payment, renewal, warranty, dispute_resolution, data_protection, other.
-
-Return ONLY valid JSON:
-{{"clauses": [{{"text": "Brief clause summary (max 100 chars)", "category": "category", "subcategory": "optional specific label", "article_ref": "Section ref or null"}}]}}"""
-
-
 def build_language_detection_prompt(contract):
     full_text = contract.get("full_text") or ""
     return f"""You are a multilingual contract analyst. Analyze this contract text.
@@ -887,27 +891,6 @@ Focus on: payment terms, obligations, cancellation, renewal, coverage, exclusion
 
 Return ONLY valid JSON:
 {{"detected_language": "e.g. Dutch", "language_code": "e.g. nl", "sections": [{{"original_text": "First 200 chars of section", "english_translation": "Translation", "section_ref": "Article/Section number or null"}}]}}"""
-
-
-def build_obligation_extraction_prompt(contract):
-    full_text = contract.get("full_text") or ""
-    parties = contract.get("parties") or []
-    key_terms = contract.get("key_terms") or []
-    parties_str = "\n".join(f"- {p.get('name', 'Unknown')} ({p.get('role', 'unknown')})" for p in parties if isinstance(p, dict)) if parties else "Not specified"
-    terms_str = "\n".join(f"- {t}" for t in key_terms[:15]) if key_terms else "None"
-    return f"""You are a contract analyst extracting obligations. Separate into: what the customer must do vs what the provider must do.
-
-PARTIES:
-{parties_str}
-
-CONTRACT TEXT:
-{full_text[:8000]}
-
-KEY TERMS:
-{terms_str}
-
-Return ONLY valid JSON:
-{{"your_obligations": [{{"description": "Clear obligation", "deadline": "Timeframe or null", "article_ref": "Ref or null", "category": "payment|notice|compliance|reporting|maintenance|other"}}], "provider_obligations": [{{"description": "...", "deadline": "...", "article_ref": "...", "category": "service_delivery|sla|maintenance|communication|other"}}]}}"""
 
 
 def build_financial_modeling_prompt(contract):
@@ -1005,68 +988,6 @@ Contract excerpt:
 Return ONLY valid JSON:
 {{"talking_points": [{{"topic": "Price Escalation", "current_term": "What it says now", "suggested_position": "What to ask for", "reasoning": "Why you have leverage", "priority": "high|medium|low"}}], "overall_leverage": "strong|moderate|weak", "leverage_reasoning": "Explanation"}}"""
 
-
-def build_clause_risk_scoring_prompt(contract):
-    full_text = contract.get("full_text") or ""
-    key_terms = contract.get("key_terms") or []
-    risks = contract.get("risks") or []
-    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None"
-    risks_str = "\n".join(f"- {r.get('title', '')}: {r.get('description', '')}" for r in risks if isinstance(r, dict)) if risks else "None"
-    return f"""You are a legal risk analyst. Score individual clauses from 1 (minimal risk) to 10 (severe risk).
-
-CONTRACT TEXT:
-{full_text[:8000]}
-
-EXISTING RISK ASSESSMENT:
-{risks_str}
-
-KEY TERMS:
-{terms_str}
-
-Focus on: liability caps, indemnification, termination penalties, auto-renewal, price escalation, data handling, IP, non-compete, exclusions.
-
-Return ONLY valid JSON:
-{{"scored_clauses": [{{"clause_text": "Summary max 150 chars", "clause_type": "liability_cap", "risk_score": 8, "risk_factors": ["Factor 1"], "mitigation_suggestion": "How to mitigate", "article_ref": "Section ref or null"}}], "overall_risk_score": 6.5}}"""
-
-
-def build_renewal_decision_prompt(contract):
-    key_terms = contract.get("key_terms") or []
-    risks = contract.get("risks") or []
-    terms_str = "\n".join(f"- {t}" for t in key_terms) if key_terms else "None"
-    risks_str = "\n".join(f"- {r.get('title', '')}: {r.get('description', '')}" for r in risks if isinstance(r, dict)) if risks else "None"
-    end_date = contract.get("end_date")
-    days_remaining = None
-    cancellation_deadline = None
-    if end_date:
-        try:
-            end_dt = datetime.strptime(end_date, "%Y-%m-%d")
-            days_remaining = (end_dt - datetime.now()).days
-            notice = contract.get("cancellation_notice_days") or 0
-            if notice:
-                cancel_dt = end_dt - timedelta(days=notice)
-                cancellation_deadline = cancel_dt.strftime("%Y-%m-%d")
-        except Exception:
-            pass
-    return f"""You are a contract renewal advisor. Recommend: RENEW, RENEGOTIATE, or CANCEL.
-
-CONTRACT: {contract.get('contract_nickname') or contract.get('provider_name')} with {contract.get('provider_name')}
-Type: {contract.get('contract_type')}
-Cost: {contract.get('monthly_cost')}/month ({contract.get('annual_cost')}/year) {contract.get('currency', 'USD')}
-Duration: {contract.get('start_date')} to {end_date}
-Auto-renewal: {contract.get('auto_renewal')}
-Cancellation notice: {contract.get('cancellation_notice_days')} days
-Today: {datetime.now().strftime('%Y-%m-%d')}
-Days until end: {days_remaining}
-Cancellation deadline: {cancellation_deadline}
-
-Key terms:
-{terms_str}
-
-Risks:
-{risks_str}
-
-Return ONLY valid JSON:
-{{"recommendation": "renew|renegotiate|cancel", "confidence": 0.85, "reasoning": "Detailed explanation", "key_factors": [{{"factor": "Price", "impact": "positive|negative|neutral", "detail": "Explanation"}}], "action_items": ["Action 1"], "days_until_deadline": {days_remaining or 'null'}}}"""
 
 
 def build_portfolio_insights_prompt(contracts_list):
@@ -1172,13 +1093,9 @@ Return ONLY valid JSON:
 
 # Skill dispatcher configuration
 SKILL_BUILDERS = {
-    "clause_classification": build_clause_classification_prompt,
     "language_detection": build_language_detection_prompt,
-    "obligation_extraction": build_obligation_extraction_prompt,
     "financial_modeling": build_financial_modeling_prompt,
     "negotiation_coach": build_negotiation_coach_prompt,
-    "clause_risk_scoring": build_clause_risk_scoring_prompt,
-    "renewal_decision": build_renewal_decision_prompt,
     "contract_summarization": build_contract_summarization_prompt,
 }
 
@@ -1190,14 +1107,10 @@ PORTFOLIO_SKILL_BUILDERS = {
 }
 
 SKILL_MAX_TOKENS = {
-    "clause_classification": 4096,
     "language_detection": 4096,
-    "obligation_extraction": 4096,
     "financial_modeling": 2048,
-    "contract_comparison": 4096,
     "negotiation_coach": 2048,
-    "clause_risk_scoring": 4096,
-    "renewal_decision": 2048,
+    "contract_comparison": 4096,
     "portfolio_insights": 4096,
     "anomaly_detection": 2048,
     "compliance_check": 1024,

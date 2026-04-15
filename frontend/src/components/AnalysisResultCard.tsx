@@ -8,19 +8,6 @@ export default function AnalysisResultCard({ analysis }: { analysis: ContractAna
 
   const renderResult = () => {
     switch (analysis.skill_type) {
-      case 'clause_classification':
-        return (
-          <div className="space-y-2">
-            {(r.clauses || []).map((c: any, i: number) => (
-              <div key={i} className="flex items-start gap-2 text-sm">
-                <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-primary-100 text-primary-700 whitespace-nowrap">{c.category}</span>
-                <span className="text-gray-700">{c.text}</span>
-                {c.article_ref && <span className="text-xs text-gray-400 whitespace-nowrap">{c.article_ref}</span>}
-              </div>
-            ))}
-          </div>
-        )
-
       case 'language_detection':
         return (
           <div>
@@ -38,34 +25,6 @@ export default function AnalysisResultCard({ analysis }: { analysis: ContractAna
                   </div>
                 </div>
               ))}
-            </div>
-          </div>
-        )
-
-      case 'obligation_extraction':
-        return (
-          <div className="grid md:grid-cols-2 gap-4">
-            <div>
-              <h4 className="text-sm font-semibold text-gray-900 mb-2">Your Obligations ({(r.your_obligations || []).length})</h4>
-              <div className="space-y-2">
-                {(r.your_obligations || []).map((o: any, i: number) => (
-                  <div key={i} className="text-sm border-l-2 border-amber-400 pl-3 py-1">
-                    <p className="text-gray-700">{o.description}</p>
-                    {o.deadline && <p className="text-xs text-gray-400 mt-0.5">Deadline: {o.deadline}</p>}
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div>
-              <h4 className="text-sm font-semibold text-gray-900 mb-2">Provider Obligations ({(r.provider_obligations || []).length})</h4>
-              <div className="space-y-2">
-                {(r.provider_obligations || []).map((o: any, i: number) => (
-                  <div key={i} className="text-sm border-l-2 border-primary-400 pl-3 py-1">
-                    <p className="text-gray-700">{o.description}</p>
-                    {o.deadline && <p className="text-xs text-gray-400 mt-0.5">Deadline: {o.deadline}</p>}
-                  </div>
-                ))}
-              </div>
             </div>
           </div>
         )
@@ -157,66 +116,6 @@ export default function AnalysisResultCard({ analysis }: { analysis: ContractAna
                 </div>
               ))}
             </div>
-          </div>
-        )
-
-      case 'clause_risk_scoring':
-        return (
-          <div>
-            <div className="flex items-center gap-3 mb-4">
-              <span className="text-sm text-gray-500">Overall Risk:</span>
-              <span className={`text-lg font-bold ${
-                (r.overall_risk_score || 0) >= 7 ? 'text-red-600' :
-                (r.overall_risk_score || 0) >= 4 ? 'text-yellow-600' : 'text-green-600'
-              }`}>{r.overall_risk_score}/10</span>
-            </div>
-            <div className="space-y-2">
-              {(r.scored_clauses || []).map((c: any, i: number) => (
-                <div key={i} className="flex items-start gap-3 text-sm">
-                  <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-xs font-bold text-white flex-shrink-0 ${
-                    c.risk_score >= 7 ? 'bg-red-500' : c.risk_score >= 4 ? 'bg-yellow-500' : 'bg-green-500'
-                  }`}>{c.risk_score}</div>
-                  <div className="flex-1">
-                    <p className="font-medium text-gray-900">{c.clause_text}</p>
-                    <p className="text-xs text-gray-500 mt-0.5">{c.risk_factors?.join(', ')}</p>
-                    {c.mitigation_suggestion && (
-                      <p className="text-xs text-primary-600 mt-0.5">Mitigation: {c.mitigation_suggestion}</p>
-                    )}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )
-
-      case 'renewal_decision':
-        return (
-          <div>
-            <div className="flex items-center gap-3 mb-4">
-              <span className={`px-4 py-2 rounded-xl text-sm font-bold ${
-                r.recommendation === 'renew' ? 'bg-green-100 text-green-700' :
-                r.recommendation === 'renegotiate' ? 'bg-yellow-100 text-yellow-700' :
-                'bg-red-100 text-red-700'
-              }`}>{r.recommendation?.toUpperCase()}</span>
-              <span className="text-sm text-gray-500">Confidence: {Math.round((r.confidence || 0) * 100)}%</span>
-              {r.days_until_deadline != null && (
-                <span className="text-sm text-gray-400">{r.days_until_deadline} days until deadline</span>
-              )}
-            </div>
-            <p className="text-sm text-gray-700 mb-3">{r.reasoning}</p>
-            {(r.action_items || []).length > 0 && (
-              <div className="bg-gray-50 rounded-lg p-3">
-                <p className="text-xs font-semibold text-gray-500 mb-2">ACTION ITEMS</p>
-                <ul className="space-y-1">
-                  {r.action_items.map((a: string, i: number) => (
-                    <li key={i} className="text-sm text-gray-700 flex items-start gap-2">
-                      <span className="w-1.5 h-1.5 rounded-full bg-primary-500 mt-1.5 flex-shrink-0" />
-                      {a}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
           </div>
         )
 
@@ -324,14 +223,10 @@ export default function AnalysisResultCard({ analysis }: { analysis: ContractAna
   }
 
   const SKILL_LABELS: Record<string, string> = {
-    clause_classification: 'Clause Classification',
     language_detection: 'Language & Translation',
-    obligation_extraction: 'Obligations',
     financial_modeling: 'Cost Forecast',
     contract_comparison: 'Contract Comparison',
     negotiation_coach: 'Negotiation Coach',
-    clause_risk_scoring: 'Clause Risk Scores',
-    renewal_decision: 'Renewal Decision',
     portfolio_insights: 'Portfolio Insights',
     anomaly_detection: 'Anomaly Detection',
     compliance_check: 'Compliance Check',

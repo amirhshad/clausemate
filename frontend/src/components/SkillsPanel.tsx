@@ -1,20 +1,16 @@
 import { useState, useEffect } from 'react'
 import {
-  Globe, ListChecks, TrendingUp, HeartHandshake, Shield,
-  RotateCcw, FileText, Sparkles, Loader2, Tags
+  Globe, TrendingUp, HeartHandshake,
+  FileText, Sparkles, Loader2
 } from 'lucide-react'
 import { runContractSkill, getContractAnalyses } from '../lib/api'
 import type { ContractAnalysis } from '../types'
 import AnalysisResultCard from './AnalysisResultCard'
 
 const CONTRACT_SKILLS = [
-  { type: 'clause_classification', label: 'Classify Clauses', icon: Tags, desc: 'Categorize clauses by type' },
   { type: 'language_detection', label: 'Translate', icon: Globe, desc: 'Detect language & translate' },
-  { type: 'obligation_extraction', label: 'Obligations', icon: ListChecks, desc: 'Extract mutual obligations' },
   { type: 'financial_modeling', label: 'Cost Forecast', icon: TrendingUp, desc: 'Lifetime cost projection' },
   { type: 'negotiation_coach', label: 'Negotiate', icon: HeartHandshake, desc: 'Negotiation talking points' },
-  { type: 'clause_risk_scoring', label: 'Risk Scores', icon: Shield, desc: 'Score clauses for risk' },
-  { type: 'renewal_decision', label: 'Renewal', icon: RotateCcw, desc: 'Renew, renegotiate, or cancel' },
   { type: 'contract_summarization', label: 'Summarize', icon: FileText, desc: 'Plain-English summary' },
 ] as const
 

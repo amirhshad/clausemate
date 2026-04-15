@@ -208,14 +208,10 @@ export const getCurrencySymbol = (currency: string): string => {
 
 // AI Skills
 export type SkillType =
-  | 'clause_classification'
   | 'language_detection'
-  | 'obligation_extraction'
   | 'financial_modeling'
   | 'contract_comparison'
   | 'negotiation_coach'
-  | 'clause_risk_scoring'
-  | 'renewal_decision'
   | 'portfolio_insights'
   | 'anomaly_detection'
   | 'compliance_check'
