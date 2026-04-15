@@ -564,26 +564,53 @@ def strip_json_markdown(text):
 
 def safe_parse_json(text):
     """Parse JSON from AI response with fallback cleanup for common issues."""
+    import re as _re
     cleaned = strip_json_markdown(text)
+
+    # Quick try
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
         pass
-    # Remove trailing commas before } or ]
-    import re as _re
+
+    # Remove trailing commas and comments
     cleaned = _re.sub(r',\s*([}\]])', r'\1', cleaned)
-    # Remove single-line comments
     cleaned = _re.sub(r'//[^\n]*', '', cleaned)
-    # Try to extract JSON object/array from surrounding text
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    # Extract JSON from surrounding text
     match = _re.search(r'(\{[\s\S]*\}|\[[\s\S]*\])', cleaned)
     if match:
+        extracted = _re.sub(r',\s*([}\]])', r'\1', match.group(1))
         try:
-            return json.loads(match.group(1))
-        except json.JSONDecodeError:
-            # Remove trailing commas again after extraction
-            extracted = _re.sub(r',\s*([}\]])', r'\1', match.group(1))
             return json.loads(extracted)
-    raise json.JSONDecodeError("No valid JSON found in AI response", cleaned, 0)
+        except json.JSONDecodeError:
+            pass
+
+    # Handle truncated JSON: find the start of JSON, then repair unclosed brackets
+    json_start = _re.search(r'[\{\[]', cleaned)
+    if json_start:
+        truncated = cleaned[json_start.start():]
+        # Remove any trailing incomplete string/value (cut at last complete value)
+        # Find last complete key-value or array element
+        truncated = _re.sub(r',\s*"[^"]*$', '', truncated)  # trailing incomplete key
+        truncated = _re.sub(r',\s*\{[^}]*$', '', truncated)  # trailing incomplete object
+        truncated = _re.sub(r',\s*$', '', truncated)  # trailing comma
+        truncated = _re.sub(r',\s*([}\]])', r'\1', truncated)  # cleanup
+        # Count unclosed brackets and close them
+        open_braces = truncated.count('{') - truncated.count('}')
+        open_brackets = truncated.count('[') - truncated.count(']')
+        truncated += ']' * open_brackets + '}' * open_braces
+        try:
+            return json.loads(truncated)
+        except json.JSONDecodeError:
+            pass
+
+    raise json.JSONDecodeError("No valid JSON found in AI response", cleaned[:200], 0)
 
 
 def chunk_text(text, chunk_size=1000, overlap=100):
@@ -1163,16 +1190,16 @@ PORTFOLIO_SKILL_BUILDERS = {
 }
 
 SKILL_MAX_TOKENS = {
-    "clause_classification": 2048,
+    "clause_classification": 4096,
     "language_detection": 4096,
-    "obligation_extraction": 2048,
+    "obligation_extraction": 4096,
     "financial_modeling": 2048,
-    "contract_comparison": 2048,
+    "contract_comparison": 4096,
     "negotiation_coach": 2048,
-    "clause_risk_scoring": 2048,
-    "renewal_decision": 1024,
-    "portfolio_insights": 2048,
-    "anomaly_detection": 1024,
+    "clause_risk_scoring": 4096,
+    "renewal_decision": 2048,
+    "portfolio_insights": 4096,
+    "anomaly_detection": 2048,
     "compliance_check": 1024,
     "contract_summarization": 1024,
 }
