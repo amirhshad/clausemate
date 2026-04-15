@@ -777,11 +777,11 @@ def answer_with_claude(prompt):
 
 
 def run_ai_analysis(prompt, max_tokens=2048):
-    """Run AI analysis with Claude primary, Gemini fallback. Returns (result_text, model_used)."""
-    def _gemini_call(prompt_text, max_tok):
+    """Run AI analysis with Gemini 3 Flash primary, Claude fallback. Returns (result_text, model_used)."""
+    def _gemini_call(prompt_text, max_tok, model_name="gemini-3-flash-preview"):
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
-        model = genai.GenerativeModel("gemini-2.5-pro")
+        model = genai.GenerativeModel(model_name)
         response = model.generate_content(prompt_text, generation_config={"max_output_tokens": max_tok, "temperature": 0.1})
         text = ""
         if response.candidates:
@@ -789,31 +789,37 @@ def run_ai_analysis(prompt, max_tokens=2048):
                 text += part.text
         if not text and hasattr(response, 'text') and response.text:
             text = response.text
-        return text, "gemini-2.5-pro"
+        return text, model_name
 
-    if ANTHROPIC_API_KEY:
+    def _claude_call(prompt_text, max_tok):
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        message = client.messages.create(
+            model="claude-sonnet-4.6-6-20250514",
+            max_tokens=max_tok,
+            temperature=0.1,
+            messages=[{"role": "user", "content": prompt_text}]
+        )
+        text = message.content[0].text if message.content else ""
+        return text, "claude-sonnet-4.6"
+
+    # Primary: Gemini 3 Flash (fast, cost-effective)
+    if GEMINI_API_KEY:
         try:
-            import anthropic
-            client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-            message = client.messages.create(
-                model="claude-sonnet-4.6-6-20250514",
-                max_tokens=max_tokens,
-                temperature=0.1,
-                messages=[{"role": "user", "content": prompt}]
-            )
-            text = message.content[0].text if message.content else ""
+            text, model_used = _gemini_call(prompt, max_tokens)
             if text:
-                return text, "claude-sonnet-4.6"
-            # Empty response from Claude, try Gemini
-            if GEMINI_API_KEY:
-                return _gemini_call(prompt, max_tokens)
-            return text, "claude-sonnet-4.6"
+                return text, model_used
+            # Empty response, try Claude
+            if ANTHROPIC_API_KEY:
+                return _claude_call(prompt, max_tokens)
+            return text, model_used
         except Exception:
-            if GEMINI_API_KEY:
-                return _gemini_call(prompt, max_tokens)
+            if ANTHROPIC_API_KEY:
+                return _claude_call(prompt, max_tokens)
             raise
-    elif GEMINI_API_KEY:
-        return _gemini_call(prompt, max_tokens)
+    # Fallback: Claude Sonnet 4.6
+    elif ANTHROPIC_API_KEY:
+        return _claude_call(prompt, max_tokens)
     raise ValueError("No AI provider configured")
 
 
@@ -1309,13 +1315,14 @@ class handler(BaseHTTPRequestHandler):
                 "smart_routing": False
             }
 
-            if ANTHROPIC_API_KEY:
-                routing_config["primary"] = "claude-sonnet-4.6"
+            if GEMINI_API_KEY:
+                routing_config["primary"] = "gemini-3-flash"
                 routing_config["smart_routing"] = True
-                if GEMINI_API_KEY:
-                    routing_config["fallback"] = "gemini-2.5-pro"
-            elif GEMINI_API_KEY:
-                routing_config["primary"] = "gemini-2.5-pro"
+                if ANTHROPIC_API_KEY:
+                    routing_config["escalation"] = "claude-sonnet-4.6"
+                    routing_config["fallback"] = "claude-sonnet-4.6"
+            elif ANTHROPIC_API_KEY:
+                routing_config["primary"] = "claude-sonnet-4.6"
                 routing_config["smart_routing"] = False
 
             return self.send_json({
@@ -1475,27 +1482,33 @@ class handler(BaseHTTPRequestHandler):
                     if is_suspicious:
                         security_flags.append(f"Suspicious filename detected: {filename[:50]}")
 
-                # Smart routing: Start with Claude Sonnet 4.6, fallback to Gemini
+                # Smart routing: Gemini 3 Flash primary, escalate to Claude for complex contracts
                 escalated = False
                 escalation_model = None
 
-                if ANTHROPIC_API_KEY:
-                    # Primary: Claude Sonnet 4.6
-                    try:
-                        raw_data = extract_with_claude(files, files_metadata)
-                    except Exception as claude_error:
-                        # Fallback to Gemini if Claude fails
-                        if GEMINI_API_KEY:
-                            raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
-                            escalated = True
-                            escalation_model = "gemini-2.5-pro (fallback)"
-                        else:
-                            raise claude_error
-                elif GEMINI_API_KEY:
-                    # Fallback: Gemini if no Anthropic key
-                    raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
+                if GEMINI_API_KEY:
+                    # Primary: Gemini 3 Flash (fast, cost-effective)
+                    raw_data = extract_with_gemini(files, files_metadata, "gemini-3-flash-preview")
+
+                    # Check if escalation needed
+                    initial_extraction = parse_extraction_result(raw_data)
+                    if needs_escalation(initial_extraction):
+                        try:
+                            if ANTHROPIC_API_KEY:
+                                raw_data = extract_with_claude(files, files_metadata)
+                                escalated = True
+                                escalation_model = "claude-sonnet-4.6"
+                            else:
+                                raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
+                                escalated = True
+                                escalation_model = "gemini-2.5-pro"
+                        except Exception:
+                            pass  # Keep initial extraction if escalation fails
+                elif ANTHROPIC_API_KEY:
+                    # Fallback: Claude if no Gemini key
+                    raw_data = extract_with_claude(files, files_metadata)
                 else:
-                    return self.send_error_json("No AI provider configured. Set ANTHROPIC_API_KEY or GEMINI_API_KEY.", 500)
+                    return self.send_error_json("No AI provider configured. Set GEMINI_API_KEY or ANTHROPIC_API_KEY.", 500)
 
                 # Validate AI output structure
                 is_valid, validation_errors = validate_extraction_output(raw_data)
@@ -1986,22 +1999,27 @@ Respond with ONLY valid JSON, no other text."""
                         400
                     )
 
-                # Smart AI extraction on new files
+                # Smart AI extraction on new files: Gemini 3 Flash primary
                 escalated = False
                 escalation_model = None
 
-                if ANTHROPIC_API_KEY:
-                    try:
-                        raw_data = extract_with_claude(files, files_metadata)
-                    except Exception:
-                        if GEMINI_API_KEY:
-                            raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
-                            escalated = True
-                            escalation_model = "gemini-2.5-pro (fallback)"
-                        else:
-                            raise
-                elif GEMINI_API_KEY:
-                    raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
+                if GEMINI_API_KEY:
+                    raw_data = extract_with_gemini(files, files_metadata, "gemini-3-flash-preview")
+                    initial_extraction = parse_extraction_result(raw_data)
+                    if needs_escalation(initial_extraction):
+                        try:
+                            if ANTHROPIC_API_KEY:
+                                raw_data = extract_with_claude(files, files_metadata)
+                                escalated = True
+                                escalation_model = "claude-sonnet-4.6"
+                            else:
+                                raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
+                                escalated = True
+                                escalation_model = "gemini-2.5-pro"
+                        except Exception:
+                            pass
+                elif ANTHROPIC_API_KEY:
+                    raw_data = extract_with_claude(files, files_metadata)
                 else:
                     return self.send_error_json("No AI provider configured", 500)
 
