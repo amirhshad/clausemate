@@ -831,7 +831,7 @@ def run_ai_analysis(prompt, max_tokens=2048):
         import google.generativeai as genai
         genai.configure(api_key=GEMINI_API_KEY)
         model = genai.GenerativeModel(model_name)
-        response = model.generate_content(prompt_text, generation_config={"max_output_tokens": max_tok, "temperature": 0.1})
+        response = model.generate_content(prompt_text, generation_config={"max_output_tokens": max_tok, "temperature": 0.1, "response_mime_type": "application/json"})
         text = ""
         if response.candidates:
             for part in response.candidates[0].content.parts:
@@ -1108,7 +1108,7 @@ PORTFOLIO_SKILL_BUILDERS = {
 
 SKILL_MAX_TOKENS = {
     "language_detection": 4096,
-    "financial_modeling": 2048,
+    "financial_modeling": 4096,
     "negotiation_coach": 2048,
     "contract_comparison": 4096,
     "portfolio_insights": 4096,
