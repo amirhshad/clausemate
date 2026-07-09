@@ -109,6 +109,15 @@ def check_rate_limit(supabase, user_id, rate_key):
         return True, None
 
 
+def report_error(e):
+    """Log an exception server-side (Vercel logs + Sentry) without leaking details to clients."""
+    import traceback
+    traceback.print_exc()
+    if SENTRY_DSN:
+        import sentry_sdk
+        sentry_sdk.capture_exception(e)
+
+
 def parse_multipart_files(body, content_type):
     """Parse multipart form data and extract all files."""
     files = []
@@ -673,7 +682,7 @@ def extract_with_gemini(files, files_metadata, model_name="gemini-3-flash-previe
     genai.configure(api_key=GEMINI_API_KEY)
 
     # Default: Gemini 3 Flash (fast, cost-effective)
-    # Escalation options: gemini-2.0-pro (preferred), claude-sonnet-4.6 (fallback)
+    # Escalation options: gemini-2.0-pro (preferred), claude-sonnet-5 (fallback)
     model = genai.GenerativeModel(model_name)
 
     # Build content parts for Gemini
@@ -749,7 +758,7 @@ def extract_with_claude(files, files_metadata):
     })
 
     response = client.messages.create(
-        model="claude-sonnet-4.6-6-20250514",
+        model="claude-sonnet-5",
         max_tokens=4096,
         messages=[{
             "role": "user",
@@ -818,7 +827,7 @@ def answer_with_claude(prompt):
     import anthropic
     client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
     message = client.messages.create(
-        model="claude-sonnet-4.6-6-20250514",
+        model="claude-sonnet-5",
         max_tokens=1024,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -844,13 +853,12 @@ def run_ai_analysis(prompt, max_tokens=2048):
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         message = client.messages.create(
-            model="claude-sonnet-4.6-6-20250514",
+            model="claude-sonnet-5",
             max_tokens=max_tok,
-            temperature=0.1,
             messages=[{"role": "user", "content": prompt_text}]
         )
         text = message.content[0].text if message.content else ""
-        return text, "claude-sonnet-4.6"
+        return text, "claude-sonnet-5"
 
     # Primary: Gemini 3 Flash (fast, cost-effective)
     if GEMINI_API_KEY:
@@ -1209,7 +1217,7 @@ Focus on:
 Provide 2-5 specific, actionable recommendations per contract. Return ONLY valid JSON."""
 
     response = client.messages.create(
-        model="claude-sonnet-4.6-6-20250514",
+        model="claude-sonnet-5",
         max_tokens=4096,
         messages=[{"role": "user", "content": prompt}]
     )
@@ -1259,10 +1267,10 @@ class handler(BaseHTTPRequestHandler):
                 routing_config["primary"] = "gemini-3-flash"
                 routing_config["smart_routing"] = True
                 if ANTHROPIC_API_KEY:
-                    routing_config["escalation"] = "claude-sonnet-4.6"
-                    routing_config["fallback"] = "claude-sonnet-4.6"
+                    routing_config["escalation"] = "claude-sonnet-5"
+                    routing_config["fallback"] = "claude-sonnet-5"
             elif ANTHROPIC_API_KEY:
-                routing_config["primary"] = "claude-sonnet-4.6"
+                routing_config["primary"] = "claude-sonnet-5"
                 routing_config["smart_routing"] = False
 
             return self.send_json({
@@ -1437,7 +1445,7 @@ class handler(BaseHTTPRequestHandler):
                             if ANTHROPIC_API_KEY:
                                 raw_data = extract_with_claude(files, files_metadata)
                                 escalated = True
-                                escalation_model = "claude-sonnet-4.6"
+                                escalation_model = "claude-sonnet-5"
                             else:
                                 raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
                                 escalated = True
@@ -1483,9 +1491,8 @@ class handler(BaseHTTPRequestHandler):
                 return self.send_json(extraction)
 
             except Exception as e:
-                import traceback
-                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-                return self.send_error_json(f"Extraction failed: {error_details}", 500)
+                report_error(e)
+                return self.send_error_json("Extraction failed. Please try again.", 500)
 
         # Upload confirm - supports multiple files
         if path == "/api/upload/confirm":
@@ -1640,9 +1647,8 @@ class handler(BaseHTTPRequestHandler):
                 return self.send_json(contract_result.data)
 
             except Exception as e:
-                import traceback
-                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-                return self.send_error_json(f"Failed to save contract: {error_details}", 500)
+                report_error(e)
+                return self.send_error_json("Failed to save contract. Please try again.", 500)
 
         # Generate recommendations using AI
         if path == "/api/recommendations/generate":
@@ -1719,9 +1725,8 @@ class handler(BaseHTTPRequestHandler):
                 return self.send_json(inserted)
 
             except Exception as e:
-                import traceback
-                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-                return self.send_error_json(f"Failed to generate recommendations: {error_details}", 500)
+                report_error(e)
+                return self.send_error_json("Failed to generate recommendations. Please try again.", 500)
 
         # Contract Q&A endpoint
         query_match = re.match(r"/api/contracts/([^/]+)/query", path)
@@ -1951,7 +1956,7 @@ Respond with ONLY valid JSON, no other text."""
                             if ANTHROPIC_API_KEY:
                                 raw_data = extract_with_claude(files, files_metadata)
                                 escalated = True
-                                escalation_model = "claude-sonnet-4.6"
+                                escalation_model = "claude-sonnet-5"
                             else:
                                 raw_data = extract_with_gemini(files, files_metadata, "gemini-2.5-pro")
                                 escalated = True
@@ -2172,9 +2177,8 @@ Respond with ONLY valid JSON, no other text."""
                 return self.send_json(updated_contract)
 
             except Exception as e:
-                import traceback
-                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-                return self.send_error_json(f"Failed to add files: {error_details}", 500)
+                report_error(e)
+                return self.send_error_json("Failed to add files. Please try again.", 500)
 
         # Run per-contract AI skill
         analyze_match = re.match(r"/api/contracts/([^/]+)/analyze$", path)
@@ -2182,7 +2186,7 @@ Respond with ONLY valid JSON, no other text."""
             contract_id = analyze_match.group(1)
             try:
                 # Rate limit
-                allowed, retry_after = check_rate_limit(supabase, user_id, "/api/contracts/analyze")
+                allowed, retry_after = check_rate_limit(supabase, user_id, "contracts/analyze")
                 if not allowed:
                     return self.send_error_json(f"Rate limited. Try again in {retry_after} seconds.", 429)
 
@@ -2229,13 +2233,13 @@ Respond with ONLY valid JSON, no other text."""
                 insert_result = supabase.table("contract_analyses").insert(analysis_record).execute()
                 return self.send_json(insert_result.data[0] if insert_result.data else analysis_record)
             except Exception as e:
-                import traceback
-                return self.send_error_json(f"Analysis failed: {type(e).__name__}: {str(e)}", 500)
+                report_error(e)
+                return self.send_error_json("Analysis failed. Please try again.", 500)
 
         # Run portfolio AI skill
         if path == "/api/portfolio/analyze":
             try:
-                allowed, retry_after = check_rate_limit(supabase, user_id, "/api/portfolio/analyze")
+                allowed, retry_after = check_rate_limit(supabase, user_id, "portfolio/analyze")
                 if not allowed:
                     return self.send_error_json(f"Rate limited. Try again in {retry_after} seconds.", 429)
 
@@ -2292,8 +2296,8 @@ Respond with ONLY valid JSON, no other text."""
                 insert_result = supabase.table("contract_analyses").insert(analysis_record).execute()
                 return self.send_json(insert_result.data[0] if insert_result.data else analysis_record)
             except Exception as e:
-                import traceback
-                return self.send_error_json(f"Portfolio analysis failed: {type(e).__name__}: {str(e)}", 500)
+                report_error(e)
+                return self.send_error_json("Portfolio analysis failed. Please try again.", 500)
 
         return self.send_error_json("Not found", 404)
 
@@ -2340,9 +2344,8 @@ Respond with ONLY valid JSON, no other text."""
                 return self.send_json(result.data[0] if result.data else {"status": "updated"})
 
             except Exception as e:
-                import traceback
-                error_details = f"{type(e).__name__}: {str(e)}\n{traceback.format_exc()}"
-                return self.send_error_json(f"Failed to update recommendation: {error_details}", 500)
+                report_error(e)
+                return self.send_error_json("Failed to update recommendation. Please try again.", 500)
 
         return self.send_error_json("Not found", 404)
 
