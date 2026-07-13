@@ -29,8 +29,12 @@ The material risks are **not** in the HTTP handler but at the **database boundar
 - **#2 — fixed in code.** `sanitize_filename()` applied at all storage-path construction sites in `api/index.py`. Ships on next deploy.
 - **#5 — fixed in code.** `send-reminders` now requires a `CRON_SECRET` shared secret (via `x-cron-secret` header or Bearer token) and fails closed. **Action required:** set the `CRON_SECRET` secret on the function and update the cron invocation to send the header, or reminder emails will 401 after the function is deployed.
 - **#6 — fixed in code.** Wildcard CORS replaced with an origin allowlist (prod + localhost; extend via `CORS_ALLOWED_ORIGINS`).
-- **#7 — fixed in code.** Rate limiter now fails closed and logs on error. The check-then-insert race remains (low severity) — a DB-side atomic counter is the proper follow-up.
-- **#8, #9, #10 — open.** Not yet addressed.
+- **#7 — fixed.** Rate limiter now fails closed and logs on error. The check-then-insert race is also closed: migration 011 adds `check_and_log_rate_limit`, a `SECURITY DEFINER` function that serializes count+insert under a per-key advisory lock and is execute-granted to `service_role` only. Applied and verified live.
+- **#8 — fixed in code.** Error responses no longer echo exception text or raw AI output; details are logged server-side and clients get generic messages.
+- **#9 — fixed in code.** Uploads are validated for PDF signature and per-file/total size, with an early `Content-Length` guard (HTTP 413) before the body is read.
+- **#10 — fixed.** Migration 011 adds the missing `DELETE` policy on `contract_chunks` (scoped to contract ownership). Applied and verified live.
+
+All audit findings (#1–#10) are now remediated. DB changes are live on the Supabase project; code changes ship on the next deploy of `api/index.py` (and `send-reminders`, which additionally needs `CRON_SECRET` set — see #5).
 
 ---
 

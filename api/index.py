@@ -53,6 +53,36 @@ def sanitize_filename(filename):
     name = re.sub(r"[^A-Za-z0-9._ -]", "_", name)
     return name[:200] or "file"
 
+
+# Upload limits
+MAX_FILE_SIZE_BYTES = 15 * 1024 * 1024      # 15 MB per file
+MAX_TOTAL_UPLOAD_BYTES = 30 * 1024 * 1024   # 30 MB per request
+
+
+def validate_pdf_files(files):
+    """Validate parsed upload files: enforce PDF signature and size limits.
+
+    Returns (ok, error_message). Guards against non-PDF payloads and oversized
+    uploads that would otherwise be sent to the AI providers or stored.
+    """
+    total = 0
+    for f in files:
+        content = f.get("content") or b""
+        size = len(content)
+        total += size
+        name = f.get("filename", "unknown")
+        if size == 0:
+            return False, f"File '{name}' is empty"
+        if size > MAX_FILE_SIZE_BYTES:
+            return False, f"File '{name}' exceeds the {MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB limit"
+        # PDF magic bytes; allow a small leading offset for stray bytes/BOM
+        if b"%PDF-" not in content[:1024]:
+            return False, f"File '{name}' is not a valid PDF"
+    if total > MAX_TOTAL_UPLOAD_BYTES:
+        return False, f"Total upload size exceeds the {MAX_TOTAL_UPLOAD_BYTES // (1024 * 1024)}MB limit"
+    return True, None
+
+
 # Rate limiting: per-user limits for AI-powered endpoints
 RATE_LIMITS = {
     "/api/upload/extract": {"max_requests": 10, "window_minutes": 60},
@@ -118,29 +148,27 @@ def check_rate_limit(supabase, user_id, rate_key):
     if not config:
         return True, None
 
-    window_start = (datetime.now(timezone.utc) - timedelta(minutes=config["window_minutes"])).isoformat()
-
     try:
-        result = supabase.table("api_rate_limits").select("id", count="exact").eq(
-            "user_id", user_id
-        ).eq("endpoint", rate_key).gte("created_at", window_start).execute()
-
-        count = result.count if result.count is not None else len(result.data or [])
-
-        if count >= config["max_requests"]:
-            return False, config["window_minutes"] * 60
-
-        # Log this request
-        supabase.table("api_rate_limits").insert({
-            "user_id": user_id,
-            "endpoint": rate_key,
+        # Atomic check-and-log via a SECURITY DEFINER function that serializes
+        # concurrent requests for the same user+endpoint (see migration 011),
+        # closing the check-then-insert race of the previous two-query approach.
+        result = supabase.rpc("check_and_log_rate_limit", {
+            "p_user_id": user_id,
+            "p_endpoint": rate_key,
+            "p_max": config["max_requests"],
+            "p_window_minutes": config["window_minutes"],
         }).execute()
 
+        allowed = result.data
+        if isinstance(allowed, list):
+            allowed = allowed[0] if allowed else True
+
+        if not allowed:
+            return False, config["window_minutes"] * 60
         return True, None
     except Exception as e:
-        # Fail closed: the api_rate_limits table exists in all deployed
-        # environments, so an error here is unexpected. Deny with a short retry
-        # rather than granting unlimited access to the paid AI endpoints.
+        # Fail closed: deny with a short retry rather than granting unlimited
+        # access to the paid AI endpoints.
         report_error(e)
         return False, 60
 
@@ -1328,7 +1356,7 @@ class handler(BaseHTTPRequestHandler):
         try:
             user_id = get_user_from_token(token)
         except Exception as e:
-            return self.send_error_json(f"Invalid token: {str(e)}", 401)
+            return self.send_error_json("Invalid or expired token", 401)
 
         supabase = get_supabase_client()
 
@@ -1433,7 +1461,7 @@ class handler(BaseHTTPRequestHandler):
         try:
             user_id = get_user_from_token(token)
         except Exception as e:
-            return self.send_error_json(f"Invalid token: {str(e)}", 401)
+            return self.send_error_json("Invalid or expired token", 401)
 
         supabase = get_supabase_client()
 
@@ -1451,6 +1479,8 @@ class handler(BaseHTTPRequestHandler):
         if path == "/api/upload/extract":
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
+                if content_length > MAX_TOTAL_UPLOAD_BYTES:
+                    return self.send_error_json("Upload too large", 413)
                 body = self.rfile.read(content_length)
                 content_type = self.headers.get("Content-Type", "")
 
@@ -1462,6 +1492,10 @@ class handler(BaseHTTPRequestHandler):
 
                 if len(files) > MAX_FILES_PER_CONTRACT:
                     return self.send_error_json(f"Maximum {MAX_FILES_PER_CONTRACT} files allowed per contract", 400)
+
+                ok, err = validate_pdf_files(files)
+                if not ok:
+                    return self.send_error_json(err, 400)
 
                 # Security check: Detect prompt injection in filenames
                 security_flags = []
@@ -1539,6 +1573,8 @@ class handler(BaseHTTPRequestHandler):
         if path == "/api/upload/confirm":
             try:
                 content_length = int(self.headers.get("Content-Length", 0))
+                if content_length > MAX_TOTAL_UPLOAD_BYTES:
+                    return self.send_error_json("Upload too large", 413)
                 body = self.rfile.read(content_length)
                 content_type = self.headers.get("Content-Type", "")
 
@@ -1557,6 +1593,10 @@ class handler(BaseHTTPRequestHandler):
 
                 if len(files) > MAX_FILES_PER_CONTRACT:
                     return self.send_error_json(f"Maximum {MAX_FILES_PER_CONTRACT} files allowed per contract", 400)
+
+                ok, err = validate_pdf_files(files)
+                if not ok:
+                    return self.send_error_json(err, 400)
 
                 # Parse JSON fields from query params
                 key_terms = None
@@ -1949,7 +1989,8 @@ Respond with ONLY valid JSON, no other text."""
                 return self.send_json({"answer": answer, "citations": citations})
 
             except Exception as e:
-                return self.send_error_json(f"Failed to generate answer: {str(e)}", 500)
+                report_error(e)
+                return self.send_error_json("Failed to generate answer. Please try again.", 500)
 
         # Add files to existing contract
         add_files_match = re.match(r"/api/contracts/([^/]+)/add-files", path)
@@ -1971,6 +2012,8 @@ Respond with ONLY valid JSON, no other text."""
 
                 # Parse incoming files
                 content_length = int(self.headers.get("Content-Length", 0))
+                if content_length > MAX_TOTAL_UPLOAD_BYTES:
+                    return self.send_error_json("Upload too large", 413)
                 body = self.rfile.read(content_length)
                 content_type = self.headers.get("Content-Type", "")
 
@@ -1984,6 +2027,10 @@ Respond with ONLY valid JSON, no other text."""
                         f"Adding {len(files)} file(s) would exceed the maximum of {MAX_FILES_PER_CONTRACT} files per contract (currently {existing_count})",
                         400
                     )
+
+                ok, err = validate_pdf_files(files)
+                if not ok:
+                    return self.send_error_json(err, 400)
 
                 # Smart AI extraction on new files: Gemini 3 Flash primary
                 escalated = False
@@ -2259,9 +2306,9 @@ Respond with ONLY valid JSON, no other text."""
                 try:
                     parsed = safe_parse_json(raw_result)
                 except (json.JSONDecodeError, Exception):
-                    # Return truncated raw response for debugging
                     preview = raw_result[:500] if raw_result else "(empty)"
-                    return self.send_error_json(f"AI returned non-JSON response. Preview: {preview}", 500)
+                    print(f"AI returned non-JSON response. Preview: {preview}")
+                    return self.send_error_json("AI returned an invalid response. Please try again.", 500)
 
                 # Store in DB
                 analysis_record = {
@@ -2323,7 +2370,8 @@ Respond with ONLY valid JSON, no other text."""
                     parsed = safe_parse_json(raw_result)
                 except (json.JSONDecodeError, Exception):
                     preview = raw_result[:500] if raw_result else "(empty)"
-                    return self.send_error_json(f"AI returned non-JSON response. Preview: {preview}", 500)
+                    print(f"AI returned non-JSON response. Preview: {preview}")
+                    return self.send_error_json("AI returned an invalid response. Please try again.", 500)
 
                 # Store - use first contract_id for comparison, null for portfolio
                 store_contract_id = contracts_list[0].get("id") if skill == "contract_comparison" else None
@@ -2353,7 +2401,7 @@ Respond with ONLY valid JSON, no other text."""
         try:
             user_id = get_user_from_token(token)
         except Exception as e:
-            return self.send_error_json(f"Invalid token: {str(e)}", 401)
+            return self.send_error_json("Invalid or expired token", 401)
 
         supabase = get_supabase_client()
 
@@ -2401,7 +2449,7 @@ Respond with ONLY valid JSON, no other text."""
         try:
             user_id = get_user_from_token(token)
         except Exception as e:
-            return self.send_error_json(f"Invalid token: {str(e)}", 401)
+            return self.send_error_json("Invalid or expired token", 401)
 
         supabase = get_supabase_client()
 

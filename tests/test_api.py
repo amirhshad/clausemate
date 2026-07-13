@@ -269,6 +269,39 @@ class TestCORS:
         assert req.response_headers.get("Access-Control-Allow-Origin") != "*"
 
 
+class TestValidatePdfFiles:
+    def _pdf(self, name="doc.pdf", body=b"%PDF-1.4 hello"):
+        return {"filename": name, "content": body}
+
+    def test_valid_pdf_passes(self):
+        from api.index import validate_pdf_files
+        ok, err = validate_pdf_files([self._pdf()])
+        assert ok is True and err is None
+
+    def test_non_pdf_rejected(self):
+        from api.index import validate_pdf_files
+        ok, err = validate_pdf_files([self._pdf(body=b"<html>not a pdf</html>")])
+        assert ok is False and "not a valid PDF" in err
+
+    def test_empty_file_rejected(self):
+        from api.index import validate_pdf_files
+        ok, err = validate_pdf_files([self._pdf(body=b"")])
+        assert ok is False and "empty" in err
+
+    def test_oversized_file_rejected(self):
+        from api.index import validate_pdf_files, MAX_FILE_SIZE_BYTES
+        big = b"%PDF-1.4" + b"0" * (MAX_FILE_SIZE_BYTES + 1)
+        ok, err = validate_pdf_files([self._pdf(body=big)])
+        assert ok is False and "limit" in err
+
+    def test_total_size_rejected(self):
+        from api.index import validate_pdf_files, MAX_FILE_SIZE_BYTES, MAX_TOTAL_UPLOAD_BYTES
+        chunk = b"%PDF-1.4" + b"0" * (MAX_FILE_SIZE_BYTES - 100)
+        files = [self._pdf(name=f"f{i}.pdf", body=chunk) for i in range(4)]
+        ok, err = validate_pdf_files(files)
+        assert ok is False  # 4 x ~15MB exceeds the 30MB total cap
+
+
 class TestSanitizeFilename:
     def test_plain_filename_unchanged(self):
         from api.index import sanitize_filename
