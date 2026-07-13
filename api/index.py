@@ -33,6 +33,26 @@ ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 # Constants
 MAX_FILES_PER_CONTRACT = 5
 
+
+def sanitize_filename(filename):
+    """Sanitize a user-supplied filename for safe use in a storage path.
+
+    Strips directory components and traversal sequences so a crafted filename
+    cannot escape the {user_id}/{contract_id}/ storage prefix (uploads run with
+    the service key, which bypasses storage RLS).
+    """
+    if not filename:
+        return "file"
+    # Basename only: drop any directory portion (handles / and \ separators)
+    name = filename.replace("\\", "/").split("/")[-1]
+    # Strip control/null bytes and residual traversal markers
+    name = re.sub(r"[\x00-\x1f]", "", name)
+    name = name.replace("..", "")
+    name = name.strip().strip(".")
+    # Conservative allowlist for the remaining characters
+    name = re.sub(r"[^A-Za-z0-9._ -]", "_", name)
+    return name[:200] or "file"
+
 # Rate limiting: per-user limits for AI-powered endpoints
 RATE_LIMITS = {
     "/api/upload/extract": {"max_requests": 10, "window_minutes": 60},
@@ -40,6 +60,19 @@ RATE_LIMITS = {
     "/api/contracts/query": {"max_requests": 30, "window_minutes": 60},
     "/api/contracts/analyze": {"max_requests": 15, "window_minutes": 60},
     "/api/portfolio/analyze": {"max_requests": 5, "window_minutes": 60},
+}
+
+# CORS: only these origins may call the API from a browser. Extra origins (e.g.
+# Vercel preview deploys) can be added via the CORS_ALLOWED_ORIGINS env var
+# (comma-separated) without a code change.
+_DEFAULT_ALLOWED_ORIGINS = {
+    "https://clausemate.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+}
+ALLOWED_ORIGINS = _DEFAULT_ALLOWED_ORIGINS | {
+    o.strip() for o in os.environ.get("CORS_ALLOWED_ORIGINS", "").split(",") if o.strip()
 }
 
 
@@ -104,9 +137,12 @@ def check_rate_limit(supabase, user_id, rate_key):
         }).execute()
 
         return True, None
-    except Exception:
-        # If rate limit table doesn't exist yet, allow the request
-        return True, None
+    except Exception as e:
+        # Fail closed: the api_rate_limits table exists in all deployed
+        # environments, so an error here is unexpected. Deny with a short retry
+        # rather than granting unlimited access to the paid AI endpoints.
+        report_error(e)
+        return False, 60
 
 
 def report_error(e):
@@ -1227,13 +1263,20 @@ Provide 2-5 specific, actionable recommendations per contract. Return ONLY valid
 
 
 class handler(BaseHTTPRequestHandler):
+    def _write_cors_headers(self):
+        """Emit CORS headers, echoing the request Origin only if allowlisted."""
+        origin = self.headers.get("Origin", self.headers.get("origin", ""))
+        self.send_header("Vary", "Origin")
+        if origin and origin in ALLOWED_ORIGINS:
+            self.send_header("Access-Control-Allow-Origin", origin)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
     def send_json(self, data, status=200):
         """Send JSON response."""
         self.send_response(status)
         self.send_header("Content-type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self._write_cors_headers()
         self.end_headers()
         self.wfile.write(json.dumps(data).encode())
 
@@ -1243,10 +1286,8 @@ class handler(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         """Handle CORS preflight."""
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_response(204)
+        self._write_cors_headers()
         self.end_headers()
 
     def do_GET(self):
@@ -1608,8 +1649,8 @@ class handler(BaseHTTPRequestHandler):
                         doc_type = files_metadata[i].get("document_type", "other")
                         label = files_metadata[i].get("label", filename)
 
-                    # Storage path includes contract_id
-                    file_path = f"{user_id}/{contract_id}/{filename}"
+                    # Storage path includes contract_id (sanitize to prevent traversal)
+                    file_path = f"{user_id}/{contract_id}/{sanitize_filename(filename)}"
 
                     try:
                         supabase.storage.from_("contracts").upload(
@@ -1634,7 +1675,7 @@ class handler(BaseHTTPRequestHandler):
 
                 # Also update the contract with the first file's path (for backward compatibility)
                 if files:
-                    first_file_path = f"{user_id}/{contract_id}/{files[0]['filename']}"
+                    first_file_path = f"{user_id}/{contract_id}/{sanitize_filename(files[0]['filename'])}"
                     supabase.table("contracts").update({
                         "file_path": first_file_path
                     }).eq("id", contract_id).execute()
@@ -2138,7 +2179,7 @@ Respond with ONLY valid JSON, no other text."""
                         doc_type = files_metadata[i].get("document_type", "other")
                         label = files_metadata[i].get("label", filename)
 
-                    file_path = f"{user_id}/{contract_id}/{filename}"
+                    file_path = f"{user_id}/{contract_id}/{sanitize_filename(filename)}"
 
                     try:
                         supabase.storage.from_("contracts").upload(
