@@ -1,0 +1,14 @@
+User-agent: *
+Allow: /
+
+# Authenticated app routes hold no public content and should not be crawled.
+Disallow: /login
+Disallow: /upload
+Disallow: /contracts
+Disallow: /timeline
+Disallow: /recommendations
+Disallow: /settings
+Disallow: /analysis
+Disallow: /api/
+
+Sitemap: https://clausemate.nl/sitemap.xml

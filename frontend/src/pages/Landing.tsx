@@ -346,7 +346,7 @@ export default function Landing() {
                 <div className="w-2.5 h-2.5 rounded-full bg-red-500/80" />
                 <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/80" />
                 <div className="w-2.5 h-2.5 rounded-full bg-green-500/80" />
-                <span className="ml-3 text-[10px] text-slate-600 font-medium">clausemate.vercel.app</span>
+                <span className="ml-3 text-[10px] text-slate-600 font-medium">clausemate.nl</span>
               </div>
 
               {/* Stat cards */}

@@ -96,6 +96,8 @@ RATE_LIMITS = {
 # Vercel preview deploys) can be added via the CORS_ALLOWED_ORIGINS env var
 # (comma-separated) without a code change.
 _DEFAULT_ALLOWED_ORIGINS = {
+    "https://clausemate.nl",
+    "https://www.clausemate.nl",
     "https://clausemate.vercel.app",
     "http://localhost:5173",
     "http://localhost:3000",
